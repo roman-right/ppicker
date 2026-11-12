@@ -1,6 +1,6 @@
 # ppicker
 
-![ppicker: every project with the editor it was last opened in](assets/hero.png)
+![ppicker: every project with the editor it was last opened in](https://raw.githubusercontent.com/roman-right/ppicker/main/assets/hero.png)
 
 Press a hotkey, type a few letters, hit Enter: the project opens in your editor.
 No typing paths, no dozens of hotkeys, no remembering which editor goes with which project.
@@ -36,7 +36,7 @@ pp add ~/work/shop        # or add one by hand ("pp add ." for the current direc
 pp
 ```
 
-**4. Bind it to a key** so it pops up when you need it. See [i3 / sway](#i3--sway).
+**4. Bind it to a key** so it pops up when you need it. See [i3 / sway](https://github.com/roman-right/ppicker#i3--sway).
 
 ## How it works
 
@@ -46,7 +46,7 @@ Start typing. ppicker matches against the project name *and* its path, so `shop`
 both find `~/work/shop`. The list narrows as you type, the best match is on top, and the matched
 letters are highlighted. Projects you opened recently come first when the search box is empty.
 
-![Searching for a project](assets/01-search.png)
+![Searching for a project](https://raw.githubusercontent.com/roman-right/ppicker/main/assets/01-search.png)
 
 The right-hand panel shows what you are about to open: the path, the current git branch, which
 editor will be used, when you last opened it, and its tags. Press `Tab` to filter by a tag
@@ -58,13 +58,13 @@ Press **Enter**. The project opens in its editor and ppicker closes. The editor 
 the project's folder and keeps running on its own, so closing the terminal does not close it.
 
 The first time you open a project, it uses your default editor, the first one in your config
-(see [Editors](#editors)). After that it uses whichever editor you opened it with last.
+(see [Editors](https://github.com/roman-right/ppicker#editors)). After that it uses whichever editor you opened it with last.
 
 ### Open it with a different editor
 
 Press **→** (right arrow) instead of Enter to choose an editor for this one.
 
-![Choosing an editor](assets/02-open-with.png)
+![Choosing an editor](https://raw.githubusercontent.com/roman-right/ppicker/main/assets/02-open-with.png)
 
 Pick one with the arrow keys and Enter, or press its number (`1`-`9`). The project opens, and
 ppicker remembers your choice for next time.
@@ -74,7 +74,7 @@ ppicker remembers your choice for next time.
 Whichever editor you open a project with becomes that project's editor. The list shows it next
 to each name, and Enter uses it.
 
-![A project remembered with PyCharm](assets/03-remembered.png)
+![A project remembered with PyCharm](https://raw.githubusercontent.com/roman-right/ppicker/main/assets/03-remembered.png)
 
 So you can keep a Python service in PyCharm, your dotfiles in vim and everything else in VS Code,
 and never think about it again. Just press Enter.
@@ -85,7 +85,7 @@ Press **Ctrl-e** to step the selected project to the next editor in your list. I
 once and a note at the bottom tells you what changed. After the last editor it wraps back to your
 default.
 
-![Switching a project's editor with Ctrl-e](assets/04-switch-editor.png)
+![Switching a project's editor with Ctrl-e](https://raw.githubusercontent.com/roman-right/ppicker/main/assets/04-switch-editor.png)
 
 ### Use rofi, wofi or fuzzel instead
 
@@ -95,7 +95,7 @@ If you already have a launcher you like, use it for the picking:
 pp menu
 ```
 
-![Picking a project in rofi](assets/05-rofi-project.png)
+![Picking a project in rofi](https://raw.githubusercontent.com/roman-right/ppicker/main/assets/05-rofi-project.png)
 
 It lists your projects, you choose one, and it opens in the remembered editor. Add `--ask` to get
 a second step where you choose the editor:
@@ -104,7 +104,7 @@ a second step where you choose the editor:
 pp menu --ask
 ```
 
-![Choosing an editor in rofi](assets/06-rofi-editor.png)
+![Choosing an editor in rofi](https://raw.githubusercontent.com/roman-right/ppicker/main/assets/06-rofi-editor.png)
 
 For other launchers, pass the command to use: `pp menu --cmd "fuzzel --dmenu"` (or `wofi --dmenu`,
 `fzf`). `{prompt}` in the command is replaced by the step name.
@@ -188,7 +188,7 @@ Two small text files you can read and edit; `pp paths` prints the exact location
 
 ## Moving from `code-compass`
 
-ppicker replaces the old Qt-based `code-compass` package. See [docs/MIGRATION.md](docs/MIGRATION.md)
+ppicker replaces the old Qt-based `code-compass` package. See [docs/MIGRATION.md](https://github.com/roman-right/ppicker/blob/main/docs/MIGRATION.md)
 for what changed and how to bring your projects over:
 
 ```shell
@@ -204,4 +204,4 @@ cargo clippy --all-targets -- -D warnings
 ```
 
 A Linux end-to-end test that drives the real program inside i3 and rofi, and produces the
-screenshots above, is described in [e2e/README.md](e2e/README.md).
+screenshots above, is described in [e2e/README.md](https://github.com/roman-right/ppicker/blob/main/e2e/README.md).
