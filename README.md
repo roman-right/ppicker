@@ -30,8 +30,27 @@ pp menu                   # pick through rofi instead
 pp run myproj "git pull"  # no UI
 ```
 
-Keys: type to search, `Enter` for actions, `1`-`9` to run an action, `Ctrl-o` to run the
-default (first) action immediately, `Tab` to cycle tags, `Esc` to go back / quit.
+Keys: type to search, `Enter` for actions, `1`-`9` to run an action, `Ctrl-o` to open the
+project in its editor immediately, `Tab` to cycle tags, `Esc` to go back / quit.
+
+### Choosing an editor per project
+
+Every project opens in the global default editor (the first entry of `ides` in the config)
+unless you pin a different one. A pinned editor is saved at once and used by `Enter`,
+`Ctrl-o`, `pp run` and `pp menu`.
+
+- In the picker, `Ctrl-e` steps the selected project through your configured editors
+  (and wraps back to the global default). The details pane shows `editor  pycharm  pinned`.
+- In the action list, move to any "Open in ..." line and press `d` to make it the project's
+  editor. It moves to the top, marked `★ project editor`.
+- From the command line:
+
+```shell
+pp editor myproj              # show the current editor
+pp editor myproj pycharm      # pin one (any command works, it need not be in `ides`)
+pp editor myproj --reset      # back to the global default
+pp add . --ide pycharm        # register and pin in one go
+```
 
 ## i3 / sway
 
@@ -48,7 +67,7 @@ Other launchers: `pp menu --cmd "fuzzel --dmenu"` (`{prompt}` is replaced by the
 `pp paths` prints the locations. `config.toml`:
 
 ```toml
-ides = ["code", "pycharm"]   # first one is the default action
+ides = ["code", "pycharm"]   # editors offered for projects; the first is the global default
 scan_dirs = ["/home/me/code"]
 ```
 

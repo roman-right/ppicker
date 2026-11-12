@@ -27,6 +27,18 @@ enum Cmd {
         name: Option<String>,
         #[arg(short, long)]
         tag: Vec<String>,
+        /// Editor command to pin for this project (default: the global one)
+        #[arg(long)]
+        ide: Option<String>,
+    },
+    /// Show, set or reset the editor pinned for a project
+    Editor {
+        project: String,
+        /// Editor command to pin, e.g. `pycharm`; omit to just show the current one
+        ide: Option<String>,
+        /// Go back to the global default editor
+        #[arg(long, conflicts_with = "ide")]
+        reset: bool,
     },
     /// Remove a project by name or path
     Rm { project: String },
@@ -80,15 +92,50 @@ fn real_main() -> Result<()> {
             }
             store.sort_recent();
             let tags = store.all_tags();
-            if let Some(p) = tui::pick(store.projects.clone(), tags, &cfg)? {
+            let projects = store.projects.clone();
+            // Editor changes made in the picker are saved the moment they happen.
+            let on_ide_change = Box::new(|path: &std::path::Path, ide: Option<&str>| {
+                store.set_ide(path, ide.map(String::from));
+                let _ = store.save();
+            });
+            let picked = tui::pick(projects, tags, &cfg, on_ide_change)?;
+            if let Some(p) = picked {
                 launch(&mut store, &p.project.path, &p.action)?;
             }
         }
-        Some(Cmd::Add { path, name, tag }) => {
+        Some(Cmd::Add {
+            path,
+            name,
+            tag,
+            ide,
+        }) => {
             let path = path.unwrap_or_else(|| PathBuf::from("."));
             let created = store.add(&path, name, tag)?;
+            if ide.is_some() {
+                store.set_ide(&store::canonical(&path)?, ide);
+            }
             store.save()?;
             println!("{}", if created { "added" } else { "updated" });
+        }
+        Some(Cmd::Editor {
+            project,
+            ide,
+            reset,
+        }) => {
+            let Some(p) = store.find(&project).cloned() else {
+                bail!("no such project: {project}");
+            };
+            if reset {
+                store.set_ide(&p.path, None);
+            } else if ide.is_some() {
+                store.set_ide(&p.path, ide);
+            }
+            store.save()?;
+            let now = store.find(&project).and_then(|p| p.ide.clone());
+            match now {
+                Some(ide) => println!("{}: {ide} (pinned)", p.name),
+                None => println!("{}: {} (default)", p.name, cfg.default_ide()),
+            }
         }
         Some(Cmd::Rm { project }) => {
             if !store.remove(&project) {
@@ -131,7 +178,7 @@ fn real_main() -> Result<()> {
             let Some(p) = store.find(&project).cloned() else {
                 bail!("no such project: {project}");
             };
-            let list = actions::detect(&p.path, &cfg);
+            let list = actions::detect(&p.path, &cfg, p.ide.as_deref());
             let chosen = match action {
                 None => list.first(),
                 Some(a) => match a.parse::<usize>() {
@@ -155,8 +202,9 @@ fn real_main() -> Result<()> {
                 return Ok(());
             };
             let path = store.projects[i].path.clone();
+            let pinned = store.projects[i].ide.clone();
 
-            let list = actions::detect(&path, &cfg);
+            let list = actions::detect(&path, &cfg, pinned.as_deref());
             let labels: Vec<String> = list.iter().map(|a| a.label.clone()).collect();
             let Some(j) = menu::choose(&cmd, "run", &labels)? else {
                 return Ok(());

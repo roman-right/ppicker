@@ -14,6 +14,8 @@ pub struct Action {
     /// Detached actions (IDEs) are spawned in the background; the rest run
     /// in the foreground of the terminal that launched `pp`.
     pub detached: bool,
+    /// Set for "Open in <editor>" actions; holds the editor command.
+    pub ide: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -39,14 +41,27 @@ fn run(label: &str, cmd: &str) -> Action {
         label: label.into(),
         cmd: cmd.into(),
         detached: false,
+        ide: None,
     }
 }
 
-/// Collect actions for a project. Order: user-defined, IDEs, detected.
-pub fn detect(dir: &Path, cfg: &Config) -> Vec<Action> {
+/// Collect actions for a project. Order: editors (the project's pinned one
+/// first, so action 1 and `Ctrl-o` always open the right editor), then
+/// user-defined actions, then detected runners.
+pub fn detect(dir: &Path, cfg: &Config, pinned_ide: Option<&str>) -> Vec<Action> {
     let mut out = Vec::new();
 
-    // 1. Project-local overrides: <project>/.ppicker.toml
+    // 1. Editors.
+    for ide in cfg.ide_choices(pinned_ide) {
+        out.push(Action {
+            label: format!("Open in {ide}"),
+            cmd: format!("{ide} ."),
+            detached: true,
+            ide: Some(ide),
+        });
+    }
+
+    // 2. Project-local actions: <project>/.ppicker.toml
     if let Ok(text) = fs::read_to_string(dir.join(".ppicker.toml"))
         && let Ok(local) = toml::from_str::<LocalFile>(&text)
     {
@@ -54,16 +69,8 @@ pub fn detect(dir: &Path, cfg: &Config) -> Vec<Action> {
             label: a.label,
             cmd: a.cmd,
             detached: a.detached,
+            ide: None,
         }));
-    }
-
-    // 2. IDEs from the global config.
-    for ide in &cfg.ides {
-        out.push(Action {
-            label: format!("Open in {ide}"),
-            cmd: format!("{ide} ."),
-            detached: true,
-        });
     }
 
     // 3. Detected runners.

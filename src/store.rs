@@ -27,6 +27,9 @@ pub struct Project {
     pub tags: Vec<String>,
     #[serde(default)]
     pub last_opened: Option<i64>,
+    /// Editor pinned for this project. `None` means the global default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ide: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -63,9 +66,7 @@ impl Store {
 
     /// Add a project, or update name/tags if the path is already known.
     pub fn add(&mut self, path: &Path, name: Option<String>, tags: Vec<String>) -> Result<bool> {
-        let path = fs::canonicalize(path)
-            .with_context(|| format!("path does not exist: {}", path.display()))?;
-        let path = strip_unc(path);
+        let path = canonical(path)?;
         let name = name.unwrap_or_else(|| {
             path.file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -83,6 +84,7 @@ impl Store {
             path,
             tags,
             last_opened: None,
+            ide: None,
         });
         Ok(true)
     }
@@ -99,6 +101,9 @@ impl Store {
                             e.tags.push(t);
                         }
                     }
+                    if e.ide.is_none() {
+                        e.ide = p.ide;
+                    }
                     e.last_opened = e.last_opened.max(p.last_opened);
                 }
                 None => {
@@ -108,6 +113,17 @@ impl Store {
             }
         }
         added
+    }
+
+    /// Pin (or with `None`, unpin) an editor for one project.
+    pub fn set_ide(&mut self, path: &Path, ide: Option<String>) -> bool {
+        match self.projects.iter_mut().find(|p| p.path == path) {
+            Some(p) => {
+                p.ide = ide;
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn remove(&mut self, key: &str) -> bool {
@@ -147,6 +163,13 @@ fn matches_key(p: &Project, key: &str) -> bool {
     p.name == key || p.path.to_string_lossy() == key
 }
 
+/// Absolute, symlink-resolved form used as a project's identity.
+pub fn canonical(path: &Path) -> Result<PathBuf> {
+    let abs = fs::canonicalize(path)
+        .with_context(|| format!("path does not exist: {}", path.display()))?;
+    Ok(strip_unc(abs))
+}
+
 /// `canonicalize` on Windows yields `\\?\C:\...`; keep paths readable.
 fn strip_unc(p: PathBuf) -> PathBuf {
     let s = p.to_string_lossy();
@@ -175,6 +198,28 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The editor used when a project has none pinned.
+    pub fn default_ide(&self) -> &str {
+        self.ides.first().map(String::as_str).unwrap_or("code")
+    }
+
+    /// Editors in menu order: the project's pinned one first, then the rest.
+    pub fn ide_choices(&self, pinned: Option<&str>) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        if let Some(p) = pinned {
+            out.push(p.to_string());
+        }
+        for ide in &self.ides {
+            if !out.contains(ide) {
+                out.push(ide.clone());
+            }
+        }
+        if out.is_empty() {
+            out.push("code".into());
+        }
+        out
+    }
+
     pub fn path() -> Result<PathBuf> {
         Ok(dirs()?.config_dir().join("config.toml"))
     }
@@ -223,6 +268,7 @@ mod tests {
             path: n.into(),
             tags: vec![],
             last_opened: t,
+            ide: None,
         };
         let mut s = Store {
             projects: vec![mk("b", None), mk("a", None), mk("c", Some(5))],
@@ -239,6 +285,7 @@ mod tests {
             path: "/x".into(),
             tags: tags.iter().map(|s| s.to_string()).collect(),
             last_opened: t,
+            ide: None,
         };
         let mut s = Store {
             projects: vec![mk(&["a"], Some(5))],
@@ -251,6 +298,7 @@ mod tests {
                     path: "/y".into(),
                     tags: vec![],
                     last_opened: None,
+                    ide: None,
                 },
             ],
         };
@@ -268,6 +316,7 @@ mod tests {
             path: "/x".into(),
             tags: vec!["t".into()],
             last_opened: Some(1),
+            ide: None,
         });
         let back: Store = toml::from_str(&toml::to_string_pretty(&s).unwrap()).unwrap();
         assert_eq!(back.projects[0].tags, vec!["t"]);
