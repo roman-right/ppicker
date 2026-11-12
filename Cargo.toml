@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Fast project picker for tiling window managers: open a project in your editor"
 license = "MIT"
-repository = "https://github.com/roman-right/code_compass"
+repository = "https://github.com/roman-right/ppicker"
 
 [[bin]]
 name = "pp"

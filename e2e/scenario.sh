@@ -88,6 +88,12 @@ sleep 1
 check "pp open uses the editor given at add time (vim)" "[ \"\$(called vim)\" = /root/code/dotfiles ]"
 $PP list
 
+echo "=== overview: every project, each with the editor it was last opened in ==="
+popup
+shot 0-overview
+xdotool key Escape; sleep 1
+pkill alacritty 2>/dev/null; sleep 1
+
 echo "=== 6. rofi ==="
 reset_calls
 $PP menu --ask --cmd "rofi -dmenu -i -p {prompt}" >/tmp/menu.log 2>&1 &
