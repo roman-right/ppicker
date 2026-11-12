@@ -54,7 +54,7 @@ class ProjectManager(QDialog):
         self.table_headers = ["Name", "Path", "Days Since Last Access"]
 
         # Initialize the main window
-        self.setWindowTitle("Code Compass (deprecated, use projpick)")
+        self.setWindowTitle("Code Compass (deprecated, use ppicker)")
         self.setLayout(QHBoxLayout())
 
         # Render sections
