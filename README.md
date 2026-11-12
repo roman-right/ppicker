@@ -7,7 +7,7 @@
 > over to another project, so migrate while this release is still available.
 > Details: [migration guide](https://github.com/roman-right/ppicker/blob/main/docs/MIGRATION.md).
 
-![Screenshot](assets/screenshot-1.png)
+![Screenshot](https://raw.githubusercontent.com/roman-right/ppicker/legacy/code-compass/assets/screenshot-1.png)
 
 A simple and intuitive desktop application to manage your coding projects, built with Python and Qt (using PySide6).
 
