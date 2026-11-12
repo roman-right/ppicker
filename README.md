@@ -1,5 +1,7 @@
 # ppicker
 
+![ppicker in an i3 popup](assets/screenshot.png)
+
 A tiny, instant project and runner picker for tiling window managers.
 Press a hotkey, type a few letters, hit Enter: your IDE opens, or a script runs.
 No typing paths, no dozens of hotkeys.
@@ -34,7 +36,7 @@ default (first) action immediately, `Tab` to cycle tags, `Esc` to go back / quit
 ## i3 / sway
 
 ```
-bindsym $mod+p exec --no-startup-id alacritty --class pp-popup -e pp
+bindsym $mod+p exec --no-startup-id alacritty --class pp-popup,pp-popup -e pp
 for_window [class="pp-popup"] floating enable, resize set 960 520, move position center
 ```
 

@@ -1,0 +1,4 @@
+# i3 config file (v4)
+font pango:DejaVu Sans Mono 10
+for_window [class="pp-popup"] floating enable, resize set 960 520, move position center
+for_window [class="Rofi"] floating enable
