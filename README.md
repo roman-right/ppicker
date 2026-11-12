@@ -1,5 +1,11 @@
 # Code Compass
 
+> **Deprecated.** This package is being retired and replaced by
+> [ppicker](https://pypi.org/project/ppicker/) (command `pp`): a much faster
+> terminal picker built for i3/sway. Move your projects over with
+> `code-compass migrate`. The `code-compass` name on PyPI will later be handed
+> over to another project, so migrate while this release is still available.
+
 ![Screenshot](assets/screenshot-1.png)
 
 A simple and intuitive desktop application to manage your coding projects, built with Python and Qt (using PySide6).
