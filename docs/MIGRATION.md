@@ -9,7 +9,8 @@ what you need to do, and how to bring your projects with you.
 1. **`ppicker` is released** on PyPI and crates.io. Its command is `pp`.
 2. **`code-compass` 0.2.0 is released** as a final version. It still works, but prints a notice
    when you start it and adds a `migrate` command that copies your projects to ppicker.
-3. **A migration period of at least 8 weeks** follows the 0.2.0 release.
+3. **A short migration period of about two weeks** follows the 0.2.0 release (until late
+   November 2026).
 4. **After that, the `code-compass` name on PyPI is handed over to a different, unrelated
    project.** Old `code-compass` releases may be removed from PyPI at that point.
 
@@ -32,6 +33,13 @@ pipx install ppicker          # or: uv tool install ppicker
 
 ```shell
 pipx run code-compass==0.2.0 migrate
+```
+
+If the name on PyPI has already been handed over, install the final release straight from
+GitHub instead; it is the same code:
+
+```shell
+pipx run --spec git+https://github.com/roman-right/ppicker@code-compass-v0.2.0 code-compass migrate
 ```
 
 This reads `~/.config/code_compass/data.db` and adds every project to ppicker. If `pp` is on your
