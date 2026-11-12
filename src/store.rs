@@ -27,7 +27,8 @@ pub struct Project {
     pub tags: Vec<String>,
     #[serde(default)]
     pub last_opened: Option<i64>,
-    /// Editor pinned for this project. `None` means the global default.
+    /// Editor remembered for this project: the one it was last opened with, or
+    /// one chosen by hand. `None` means the global default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ide: Option<String>,
 }
@@ -136,9 +137,14 @@ impl Store {
         self.projects.iter().find(|p| matches_key(p, key))
     }
 
-    pub fn touch(&mut self, path: &Path) {
+    /// Note that a project was just launched. If it was opened with an editor,
+    /// that editor is remembered as the project's editor for next time.
+    pub fn record_launch(&mut self, path: &Path, ide: Option<&str>) {
         if let Some(p) = self.projects.iter_mut().find(|p| p.path == path) {
             p.last_opened = Some(now());
+            if let Some(ide) = ide {
+                p.ide = Some(ide.to_string());
+            }
         }
     }
 
@@ -306,6 +312,33 @@ mod tests {
         assert_eq!(s.projects.len(), 2);
         assert_eq!(s.projects[0].tags, vec!["a", "b"]);
         assert_eq!(s.projects[0].last_opened, Some(9));
+    }
+
+    #[test]
+    fn launching_with_an_editor_remembers_it_other_actions_do_not() {
+        let mk = |ide: Option<&str>| Project {
+            name: "x".into(),
+            path: "/x".into(),
+            tags: vec![],
+            last_opened: None,
+            ide: ide.map(String::from),
+        };
+        let mut s = Store {
+            projects: vec![mk(None)],
+        };
+        let p = Path::new("/x");
+
+        s.record_launch(p, Some("vim"));
+        assert_eq!(s.projects[0].ide.as_deref(), Some("vim"));
+        assert!(s.projects[0].last_opened.is_some());
+
+        // Running `git pull` (no editor) must not forget it.
+        s.record_launch(p, None);
+        assert_eq!(s.projects[0].ide.as_deref(), Some("vim"));
+
+        // Opening with a different editor replaces it.
+        s.record_launch(p, Some("code"));
+        assert_eq!(s.projects[0].ide.as_deref(), Some("code"));
     }
 
     #[test]

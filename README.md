@@ -35,21 +35,24 @@ project in its editor immediately, `Tab` to cycle tags, `Esc` to go back / quit.
 
 ### Choosing an editor per project
 
-Every project opens in the global default editor (the first entry of `ides` in the config)
-unless you pin a different one. A pinned editor is saved at once and used by `Enter`,
-`Ctrl-o`, `pp run` and `pp menu`.
+A project you have never opened uses the global default editor (the first entry of `ides`
+in the config). **Whichever editor you open a project with becomes that project's editor**:
+next time it is the first action, marked `★ last used`, and `Ctrl-o` opens it straight away.
+This applies to the picker, `pp run` and `pp menu`. Running a non-editor action such as
+`git pull` leaves it alone.
+
+To choose one without opening the project:
 
 - In the picker, `Ctrl-e` steps the selected project through your configured editors
-  (and wraps back to the global default). The details pane shows `editor  pycharm  pinned`.
-- In the action list, move to any "Open in ..." line and press `d` to make it the project's
-  editor. It moves to the top, marked `★ project editor`.
+  (and wraps back to the global default). The details pane shows `editor  pycharm  last used`.
+- In the action list, move to any "Open in ..." line and press `d`.
 - From the command line:
 
 ```shell
 pp editor myproj              # show the current editor
-pp editor myproj pycharm      # pin one (any command works, it need not be in `ides`)
-pp editor myproj --reset      # back to the global default
-pp add . --ide pycharm        # register and pin in one go
+pp editor myproj pycharm      # set one (any command works, it need not be in `ides`)
+pp editor myproj --reset      # forget it, back to the global default
+pp add . --ide pycharm        # register and set in one go
 ```
 
 ## i3 / sway

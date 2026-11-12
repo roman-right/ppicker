@@ -212,10 +212,7 @@ impl<'a> App<'a> {
             .and_then(|i| self.actions.get(i))
             .and_then(|a| a.ide.clone());
         match ide {
-            Some(ide) => {
-                let new = (ide != self.cfg.default_ide()).then_some(ide);
-                self.set_project_ide(new);
-            }
+            Some(ide) => self.set_project_ide(Some(ide)),
             None => {
                 self.status = Some("select an \"Open in ...\" action to make it the editor".into())
             }
@@ -428,7 +425,7 @@ impl<'a> App<'a> {
                 label("editor"),
                 Span::styled(ide.to_string(), Style::new().fg(MATCH)),
                 Span::styled(
-                    if pinned { "  pinned" } else { "  default" },
+                    if pinned { "  last used" } else { "  default" },
                     Style::new().fg(DIM),
                 ),
             ]));
@@ -486,7 +483,7 @@ impl<'a> App<'a> {
                 // Mark which editor opens by default for this project.
                 if a.ide.is_some() && i == 0 {
                     let note = if pinned.is_some() {
-                        "  ★ project editor"
+                        "  ★ last used"
                     } else {
                         "  ★ default"
                     };
@@ -673,16 +670,17 @@ mod tests {
     }
 
     #[test]
-    fn pinning_the_global_default_clears_the_pin() {
+    fn d_on_the_global_default_editor_remembers_it_too() {
         let cfg = three_ides();
         let (mut a, saved) = app_rec(&cfg);
-        a.on_key(KeyCode::Char('e'), KeyModifiers::CONTROL); // pin pycharm
+        a.on_key(KeyCode::Char('e'), KeyModifiers::CONTROL); // pycharm
         a.on_key(KeyCode::Enter, KeyModifiers::NONE);
-        // actions: pycharm (pinned), code, vim; pick "code" = the global default
+        // actions: pycharm, code, vim; pick "code", which is the global default
         a.on_key(KeyCode::Down, KeyModifiers::NONE);
         a.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
-        assert_eq!(a.current().unwrap().ide, None);
-        assert_eq!(saved.borrow().last().unwrap().1, None);
+        assert_eq!(a.current().unwrap().ide.as_deref(), Some("code"));
+        assert_eq!(a.actions[0].label, "Open in code");
+        assert_eq!(saved.borrow().last().unwrap().1.as_deref(), Some("code"));
     }
 
     #[test]

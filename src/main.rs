@@ -31,7 +31,8 @@ enum Cmd {
         #[arg(long)]
         ide: Option<String>,
     },
-    /// Show, set or reset the editor pinned for a project
+    /// Show, set or forget the editor remembered for a project
+    /// (it is also remembered automatically whenever you open the project)
     Editor {
         project: String,
         /// Editor command to pin, e.g. `pycharm`; omit to just show the current one
@@ -133,7 +134,7 @@ fn real_main() -> Result<()> {
             store.save()?;
             let now = store.find(&project).and_then(|p| p.ide.clone());
             match now {
-                Some(ide) => println!("{}: {ide} (pinned)", p.name),
+                Some(ide) => println!("{}: {ide} (remembered)", p.name),
                 None => println!("{}: {} (default)", p.name, cfg.default_ide()),
             }
         }
@@ -234,7 +235,7 @@ fn real_main() -> Result<()> {
 /// Record the launch, then run. Saving first matters: on Unix a foreground
 /// action replaces this process via exec and never returns.
 fn launch(store: &mut Store, path: &std::path::Path, action: &actions::Action) -> Result<()> {
-    store.touch(path);
+    store.record_launch(path, action.ide.as_deref());
     store.save()?;
     exec::execute(path, action)
 }

@@ -65,6 +65,28 @@ xdotool key ctrl+o; sleep 2
 check "Ctrl-o opened the pinned editor" "[ \"\$(cat /tmp/vim_called 2>/dev/null)\" = /root/code/api-server ]"
 pkill alacritty 2>/dev/null; sleep 1
 
+echo "=== 2b. the editor you opened with is remembered automatically ==="
+ide_of() { awk -v n="$1" '$0 ~ "name = \""n"\""{f=1} f&&/^ide =/{print $3; exit} f&&/^\[\[project\]\]/{exit}' ~/.local/share/ppicker/projects.toml | tr -d '"'; }
+check "web-ui starts with no remembered editor" "[ -z \"\$(ide_of web-ui)\" ]"
+popup
+xdotool type --delay 120 "web"; sleep 1
+xdotool key Return; sleep 1
+xdotool key Down; sleep 0.3          # "Open in pycharm": just open it, no pinning key
+xdotool key Return; sleep 2
+check "pycharm launched in web-ui" "[ \"\$(cat /tmp/pycharm_called 2>/dev/null)\" = /root/code/web-ui ]"
+check "pycharm remembered for web-ui" "[ \"\$(ide_of web-ui)\" = pycharm ]"
+pkill alacritty 2>/dev/null; sleep 1
+popup
+xdotool type --delay 120 "web"; sleep 1
+xdotool key Return; sleep 1
+shot 5b-last-used                    # pycharm first, marked "last used"
+xdotool key Escape Escape; sleep 0.5
+pkill alacritty 2>/dev/null; sleep 1
+$PP run notes "Open in vim" >/dev/null
+check "pp run remembers the editor" "[ \"\$(ide_of notes)\" = vim ]"
+$PP run notes "git status" >/dev/null 2>&1
+check "a non-editor action keeps it" "[ \"\$(ide_of notes)\" = vim ]"
+
 echo "=== 3. CLI ==="
 $PP editor api-server
 $PP editor api-server --reset
