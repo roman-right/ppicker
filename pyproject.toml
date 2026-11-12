@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "ppicker"
-description = "Fast project and runner picker for tiling window managers (i3, sway)"
+description = "Fast project picker for tiling window managers (i3, sway): open a project in your editor"
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }

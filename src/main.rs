@@ -1,10 +1,9 @@
-mod actions;
 mod exec;
 mod menu;
 mod store;
 mod tui;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
@@ -12,7 +11,11 @@ use clap::{Parser, Subcommand};
 use store::{Config, Store};
 
 #[derive(Parser)]
-#[command(name = "pp", version, about = "Fast project and runner picker")]
+#[command(
+    name = "pp",
+    version,
+    about = "Fast project picker: open a project in your editor"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Cmd>,
@@ -27,7 +30,7 @@ enum Cmd {
         name: Option<String>,
         #[arg(short, long)]
         tag: Vec<String>,
-        /// Editor command to pin for this project (default: the global one)
+        /// Editor command to remember for this project
         #[arg(long)]
         ide: Option<String>,
     },
@@ -35,9 +38,9 @@ enum Cmd {
     /// (it is also remembered automatically whenever you open the project)
     Editor {
         project: String,
-        /// Editor command to pin, e.g. `pycharm`; omit to just show the current one
+        /// Editor command, e.g. `pycharm`; omit to just show the current one
         ide: Option<String>,
-        /// Go back to the global default editor
+        /// Forget it and go back to the global default editor
         #[arg(long, conflicts_with = "ide")]
         reset: bool,
     },
@@ -45,7 +48,7 @@ enum Cmd {
     Rm { project: String },
     /// List projects
     List {
-        /// Print tab-separated name, path, tags
+        /// Print tab-separated name, path, tags, editor
         #[arg(long)]
         plain: bool,
     },
@@ -55,17 +58,19 @@ enum Cmd {
         #[arg(short, long)]
         tag: Vec<String>,
     },
-    /// Run an action for a project without the picker (default: first action)
-    Run {
+    /// Open a project without the picker, in its editor or the one given
+    Open {
         project: String,
-        /// Action label (or its 1-based number)
-        action: Option<String>,
+        ide: Option<String>,
     },
     /// Pick through an external dmenu-compatible launcher (rofi, wofi, fuzzel, fzf)
     Menu {
         /// Menu command; `{prompt}` is replaced with the step name
         #[arg(long, default_value = menu::DEFAULT_CMD)]
         cmd: String,
+        /// Also ask which editor to use, instead of opening in the remembered one
+        #[arg(long)]
+        ask: bool,
     },
     /// Import projects from a TOML file (`-` for stdin), e.g. from `code-compass migrate`
     Import { file: String },
@@ -95,13 +100,13 @@ fn real_main() -> Result<()> {
             let tags = store.all_tags();
             let projects = store.projects.clone();
             // Editor changes made in the picker are saved the moment they happen.
-            let on_ide_change = Box::new(|path: &std::path::Path, ide: Option<&str>| {
+            let on_ide_change = Box::new(|path: &Path, ide: Option<&str>| {
                 store.set_ide(path, ide.map(String::from));
                 let _ = store.save();
             });
             let picked = tui::pick(projects, tags, &cfg, on_ide_change)?;
             if let Some(p) = picked {
-                launch(&mut store, &p.project.path, &p.action)?;
+                launch(&mut store, &p.project.path, &p.ide)?;
             }
         }
         Some(Cmd::Add {
@@ -147,10 +152,16 @@ fn real_main() -> Result<()> {
         Some(Cmd::List { plain }) => {
             store.sort_recent();
             for p in &store.projects {
+                let ide = p.ide.as_deref().unwrap_or_else(|| cfg.default_ide());
                 if plain {
-                    println!("{}\t{}\t{}", p.name, p.path.display(), p.tags.join(","));
+                    println!(
+                        "{}\t{}\t{}\t{ide}",
+                        p.name,
+                        p.path.display(),
+                        p.tags.join(",")
+                    );
                 } else {
-                    println!("{:<28} {}", p.name, p.path.display());
+                    println!("{:<28} {:<10} {}", p.name, ide, p.path.display());
                 }
             }
         }
@@ -175,24 +186,16 @@ fn real_main() -> Result<()> {
             store.save()?;
             println!("added {added} project(s)");
         }
-        Some(Cmd::Run { project, action }) => {
+        Some(Cmd::Open { project, ide }) => {
             let Some(p) = store.find(&project).cloned() else {
                 bail!("no such project: {project}");
             };
-            let list = actions::detect(&p.path, &cfg, p.ide.as_deref());
-            let chosen = match action {
-                None => list.first(),
-                Some(a) => match a.parse::<usize>() {
-                    Ok(n) => list.get(n.wrapping_sub(1)),
-                    Err(_) => list.iter().find(|x| x.label.eq_ignore_ascii_case(&a)),
-                },
-            };
-            let Some(chosen) = chosen else {
-                bail!("no such action")
-            };
-            launch(&mut store, &p.path, chosen)?;
+            let ide = ide
+                .or(p.ide.clone())
+                .unwrap_or_else(|| cfg.default_ide().to_string());
+            launch(&mut store, &p.path, &ide)?;
         }
-        Some(Cmd::Menu { cmd }) => {
+        Some(Cmd::Menu { cmd, ask }) => {
             store.sort_recent();
             let lines: Vec<String> = store
                 .projects
@@ -205,12 +208,16 @@ fn real_main() -> Result<()> {
             let path = store.projects[i].path.clone();
             let pinned = store.projects[i].ide.clone();
 
-            let list = actions::detect(&path, &cfg, pinned.as_deref());
-            let labels: Vec<String> = list.iter().map(|a| a.label.clone()).collect();
-            let Some(j) = menu::choose(&cmd, "run", &labels)? else {
-                return Ok(());
+            let choices = cfg.ide_choices(pinned.as_deref());
+            let ide = if ask {
+                let Some(j) = menu::choose(&cmd, "editor", &choices)? else {
+                    return Ok(());
+                };
+                choices[j].clone()
+            } else {
+                choices[0].clone()
             };
-            launch(&mut store, &path, &list[j])?;
+            launch(&mut store, &path, &ide)?;
         }
         Some(Cmd::Import { file }) => {
             let text = if file == "-" {
@@ -232,10 +239,9 @@ fn real_main() -> Result<()> {
     Ok(())
 }
 
-/// Record the launch, then run. Saving first matters: on Unix a foreground
-/// action replaces this process via exec and never returns.
-fn launch(store: &mut Store, path: &std::path::Path, action: &actions::Action) -> Result<()> {
-    store.record_launch(path, action.ide.as_deref());
+/// Remember the editor and the open time, then start the editor.
+fn launch(store: &mut Store, path: &Path, ide: &str) -> Result<()> {
+    store.record_launch(path, Some(ide));
     store.save()?;
-    exec::execute(path, action)
+    exec::open(path, ide)
 }

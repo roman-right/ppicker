@@ -2,13 +2,13 @@
 
 ![ppicker in an i3 popup](assets/screenshot.png)
 
-A tiny, instant project and runner picker for tiling window managers.
-Press a hotkey, type a few letters, hit Enter: your IDE opens, or a script runs.
+A tiny, instant project picker for tiling window managers.
+Press a hotkey, type a few letters, hit Enter: the project opens in your editor.
 No typing paths, no dozens of hotkeys.
 
 - ~1 MB single binary, starts in milliseconds
 - Fuzzy search, tag filters, git branch and last-opened preview
-- Actions auto-detected: IDEs, `cargo`, `npm`/`pnpm`/`yarn`/`bun` scripts, `uv`, `just`, `make`, `docker compose`, `git`
+- Remembers which editor each project was last opened with
 - Works as a built-in TUI or through rofi / wofi / fuzzel / fzf
 
 ## Install
@@ -27,33 +27,40 @@ pp add .                  # register the current directory
 pp scan ~/code -t work    # register every git repo inside ~/code
 pp                        # open the picker
 pp menu                   # pick through rofi instead
-pp run myproj "git pull"  # no UI
+pp open myproj            # no UI
 ```
 
-Keys: type to search, `Enter` for actions, `1`-`9` to run an action, `Ctrl-o` to open the
-project in its editor immediately, `Tab` to cycle tags, `Esc` to go back / quit.
+In the picker: type to search, `Enter` opens the project in its editor, `→` lets you open it
+with a different one, `Tab` cycles tags, `Esc` quits.
 
-### Choosing an editor per project
+## Editors
 
-A project you have never opened uses the global default editor (the first entry of `ides`
-in the config). **Whichever editor you open a project with becomes that project's editor**:
-next time it is the first action, marked `★ last used`, and `Ctrl-o` opens it straight away.
-This applies to the picker, `pp run` and `pp menu`. Running a non-editor action such as
-`git pull` leaves it alone.
+Set the editors you use in the config; the first is the default:
 
-To choose one without opening the project:
+```toml
+ides = ["code", "pycharm", "vim"]
+```
 
-- In the picker, `Ctrl-e` steps the selected project through your configured editors
-  (and wraps back to the global default). The details pane shows `editor  pycharm  last used`.
-- In the action list, move to any "Open in ..." line and press `d`.
+A project you have never opened uses the default. **Whichever editor you open a project with
+becomes that project's editor**, so the next `Enter` (or `pp open`, or `pp menu`) opens it there.
+The list shows each project's editor next to its name.
+
+To open with another editor: press `→` and pick one (or `1`-`9`); it is remembered from then on.
+
+To change it without opening the project:
+
+- `Ctrl-e` steps the selected project through your editors and wraps back to the default.
 - From the command line:
 
 ```shell
 pp editor myproj              # show the current editor
 pp editor myproj pycharm      # set one (any command works, it need not be in `ides`)
-pp editor myproj --reset      # forget it, back to the global default
+pp editor myproj --reset      # forget it, back to the default
 pp add . --ide pycharm        # register and set in one go
+pp open myproj vim            # open once with a specific editor (and remember it)
 ```
+
+The editor is started as `<command> .` inside the project directory, detached from the picker.
 
 ## i3 / sway
 
@@ -62,24 +69,17 @@ bindsym $mod+p exec --no-startup-id alacritty --class pp-popup,pp-popup -e pp
 for_window [class="pp-popup"] floating enable, resize set 960 520, move position center
 ```
 
-Or with rofi: `bindsym $mod+p exec --no-startup-id pp menu`.
-Other launchers: `pp menu --cmd "fuzzel --dmenu"` (`{prompt}` is replaced by the step name).
+Or with rofi: `bindsym $mod+p exec --no-startup-id pp menu`. Add `--ask` to choose the
+editor in a second step. Other launchers: `pp menu --cmd "fuzzel --dmenu"`
+(`{prompt}` is replaced by the step name).
 
 ## Config
 
 `pp paths` prints the locations. `config.toml`:
 
 ```toml
-ides = ["code", "pycharm"]   # editors offered for projects; the first is the global default
+ides = ["code", "pycharm"]   # editors offered for projects; the first is the default
 scan_dirs = ["/home/me/code"]
-```
-
-Per-project actions go in `<project>/.ppicker.toml`:
-
-```toml
-[[action]]
-label = "Dev server"
-cmd = "npm run dev"
 ```
 
 ## Migrating from `code-compass` 0.1.x

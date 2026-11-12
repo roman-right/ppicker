@@ -1,4 +1,4 @@
-//! Interactive picker: fuzzy project search, then an action list.
+//! Interactive picker: fuzzy project search; Enter opens the project in its editor.
 
 use std::fs;
 use std::path::Path;
@@ -13,7 +13,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
-use crate::actions::{self, Action};
 use crate::store::{Config, Project, now};
 
 const ACCENT: Color = Color::Rgb(137, 180, 250);
@@ -24,16 +23,18 @@ const SELECT_BG: Color = Color::Rgb(49, 50, 68);
 #[derive(PartialEq)]
 enum Stage {
     Projects,
-    Actions,
+    /// "Open with..." list for the selected project.
+    Editors,
 }
 
-/// Receives `(project path, pinned editor)` each time the editor changes.
-type IdeChanged<'a> = Box<dyn FnMut(&Path, Option<&str>) + 'a>;
-
+/// What the user chose: open `project` with the editor command `ide`.
 pub struct Picked {
     pub project: Project,
-    pub action: Action,
+    pub ide: String,
 }
+
+/// Receives `(project path, remembered editor)` each time the editor changes.
+type IdeChanged<'a> = Box<dyn FnMut(&Path, Option<&str>) + 'a>;
 
 struct App<'a> {
     cfg: &'a Config,
@@ -45,11 +46,12 @@ struct App<'a> {
     visible: Vec<usize>,
     list: ListState,
     stage: Stage,
-    actions: Vec<Action>,
-    action_list: ListState,
+    /// Editors offered for the selected project, remembered one first.
+    editors: Vec<String>,
+    editor_list: ListState,
     matcher: Matcher,
     done: Option<Option<Picked>>,
-    /// Called whenever a project's pinned editor changes, so it is saved at once.
+    /// Called whenever a project's editor changes, so it is saved at once.
     on_ide_change: IdeChanged<'a>,
     /// One-line feedback shown in place of the key hints until the next key.
     status: Option<String>,
@@ -63,8 +65,6 @@ impl<'a> App<'a> {
         on_ide_change: IdeChanged<'a>,
     ) -> Self {
         let mut app = Self {
-            on_ide_change,
-            status: None,
             cfg,
             projects,
             tags,
@@ -73,10 +73,12 @@ impl<'a> App<'a> {
             visible: vec![],
             list: ListState::default(),
             stage: Stage::Projects,
-            actions: vec![],
-            action_list: ListState::default(),
+            editors: vec![],
+            editor_list: ListState::default(),
             matcher: Matcher::new(MatcherConfig::DEFAULT.match_paths()),
             done: None,
+            on_ide_change,
+            status: None,
         };
         app.refilter();
         app
@@ -125,7 +127,7 @@ impl<'a> App<'a> {
     fn move_sel(&mut self, delta: isize) {
         let (state, len) = match self.stage {
             Stage::Projects => (&mut self.list, self.visible.len()),
-            Stage::Actions => (&mut self.action_list, self.actions.len()),
+            Stage::Editors => (&mut self.editor_list, self.editors.len()),
         };
         if len == 0 {
             return;
@@ -149,15 +151,7 @@ impl<'a> App<'a> {
         self.refilter();
     }
 
-    fn enter_actions(&mut self) {
-        if let Some(p) = self.current() {
-            self.actions = actions::detect(&p.path, self.cfg, p.ide.as_deref());
-            self.action_list.select(Some(0));
-            self.stage = Stage::Actions;
-        }
-    }
-
-    /// Editor that opens for a project, and whether it is pinned to it.
+    /// Editor that opens for a project, and whether one is remembered for it.
     fn effective_ide<'p>(&'p self, p: &'p Project) -> (&'p str, bool) {
         match p.ide.as_deref() {
             Some(ide) => (ide, true),
@@ -165,8 +159,38 @@ impl<'a> App<'a> {
         }
     }
 
-    /// Pin an editor for the selected project (`None` = global default),
-    /// save it immediately and refresh the action list.
+    /// Open the selected project in its own editor (Enter).
+    fn open_current(&mut self) {
+        if let Some(p) = self.current() {
+            let ide = self.effective_ide(p).0.to_string();
+            self.done = Some(Some(Picked {
+                project: p.clone(),
+                ide,
+            }));
+        }
+    }
+
+    /// Show the "Open with..." list (Right arrow).
+    fn enter_editors(&mut self) {
+        if let Some(p) = self.current() {
+            let pinned = p.ide.clone();
+            self.editors = self.cfg.ide_choices(pinned.as_deref());
+            self.editor_list.select(Some(0));
+            self.stage = Stage::Editors;
+        }
+    }
+
+    fn open_with(&mut self, index: usize) {
+        if let (Some(p), Some(ide)) = (self.current(), self.editors.get(index)) {
+            self.done = Some(Some(Picked {
+                project: p.clone(),
+                ide: ide.clone(),
+            }));
+        }
+    }
+
+    /// Remember an editor for the selected project (`None` = global default)
+    /// and save it immediately.
     fn set_project_ide(&mut self, ide: Option<String>) {
         let Some(&idx) = self.list.selected().and_then(|i| self.visible.get(i)) else {
             return;
@@ -174,15 +198,12 @@ impl<'a> App<'a> {
         self.projects[idx].ide = ide.clone();
         let p = &self.projects[idx];
         (self.on_ide_change)(&p.path, ide.as_deref());
-        let (name, pinned) = self.effective_ide(p);
+        let (name, remembered) = self.effective_ide(p);
         self.status = Some(format!(
             "{}: editor is now {name}{}",
             p.name,
-            if pinned { "" } else { " (global default)" }
+            if remembered { "" } else { " (global default)" }
         ));
-        if self.stage == Stage::Actions {
-            self.enter_actions();
-        }
     }
 
     /// Ctrl-e: step through the configured editors; wraps to the global default.
@@ -204,30 +225,6 @@ impl<'a> App<'a> {
         self.set_project_ide(new);
     }
 
-    /// `d` in the action list: make the selected "Open in ..." the project's editor.
-    fn pin_selected_action(&mut self) {
-        let ide = self
-            .action_list
-            .selected()
-            .and_then(|i| self.actions.get(i))
-            .and_then(|a| a.ide.clone());
-        match ide {
-            Some(ide) => self.set_project_ide(Some(ide)),
-            None => {
-                self.status = Some("select an \"Open in ...\" action to make it the editor".into())
-            }
-        }
-    }
-
-    fn finish(&mut self, index: usize) {
-        if let (Some(p), Some(a)) = (self.current(), self.actions.get(index)) {
-            self.done = Some(Some(Picked {
-                project: p.clone(),
-                action: a.clone(),
-            }));
-        }
-    }
-
     fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) {
         let ctrl = mods.contains(KeyModifiers::CONTROL);
         self.status = None;
@@ -237,7 +234,7 @@ impl<'a> App<'a> {
             (KeyCode::Up, _) | (KeyCode::Char('p' | 'k'), true) => self.move_sel(-1),
             _ => match self.stage {
                 Stage::Projects => self.on_key_projects(code, ctrl),
-                Stage::Actions => self.on_key_actions(code),
+                Stage::Editors => self.on_key_editors(code),
             },
         }
     }
@@ -245,12 +242,8 @@ impl<'a> App<'a> {
     fn on_key_projects(&mut self, code: KeyCode, ctrl: bool) {
         match (code, ctrl) {
             (KeyCode::Esc, _) => self.done = Some(None),
-            (KeyCode::Enter, _) | (KeyCode::Right, _) => self.enter_actions(),
-            // Ctrl-O: skip the action list and run the default action.
-            (KeyCode::Char('o'), true) => {
-                self.enter_actions();
-                self.finish(0);
-            }
+            (KeyCode::Enter, _) => self.open_current(),
+            (KeyCode::Right, _) => self.enter_editors(),
             (KeyCode::Char('e'), true) => self.cycle_ide(),
             (KeyCode::Tab, _) => self.cycle_tag(true),
             (KeyCode::BackTab, _) => self.cycle_tag(false),
@@ -270,19 +263,18 @@ impl<'a> App<'a> {
         }
     }
 
-    fn on_key_actions(&mut self, code: KeyCode) {
+    fn on_key_editors(&mut self, code: KeyCode) {
         match code {
             KeyCode::Esc | KeyCode::Left | KeyCode::Backspace => self.stage = Stage::Projects,
             KeyCode::Enter => {
-                if let Some(i) = self.action_list.selected() {
-                    self.finish(i);
+                if let Some(i) = self.editor_list.selected() {
+                    self.open_with(i);
                 }
             }
-            KeyCode::Char('d') => self.pin_selected_action(),
             KeyCode::Char(c @ '1'..='9') => {
                 let i = c as usize - '1' as usize;
-                if i < self.actions.len() {
-                    self.finish(i);
+                if i < self.editors.len() {
+                    self.open_with(i);
                 }
             }
             _ => {}
@@ -310,7 +302,7 @@ impl<'a> App<'a> {
         self.draw_projects(f, left);
         match self.stage {
             Stage::Projects => self.draw_preview(f, right),
-            Stage::Actions => self.draw_actions(f, right),
+            Stage::Editors => self.draw_editors(f, right),
         }
         self.draw_hint(f, hint);
     }
@@ -360,6 +352,7 @@ impl<'a> App<'a> {
             .title(format!(" Projects ({}) ", self.visible.len()));
 
         let pattern = Pattern::parse(&self.query, CaseMatching::Smart, Normalization::Smart);
+        let default_ide = self.cfg.default_ide();
         let items: Vec<ListItem> = self
             .visible
             .iter()
@@ -374,7 +367,7 @@ impl<'a> App<'a> {
                         &mut idx,
                     );
                 }
-                let spans: Vec<Span> = p
+                let mut spans: Vec<Span> = p
                     .name
                     .chars()
                     .enumerate()
@@ -389,6 +382,9 @@ impl<'a> App<'a> {
                         }
                     })
                     .collect();
+                // Show which editor Enter will use, right in the list.
+                let ide = p.ide.as_deref().unwrap_or(default_ide);
+                spans.push(Span::styled(format!("  {ide}"), Style::new().fg(DIM)));
                 ListItem::new(Line::from(spans))
             })
             .collect();
@@ -420,12 +416,16 @@ impl<'a> App<'a> {
             if let Some(b) = git_branch(&p.path) {
                 lines.push(Line::from(vec![label("branch"), Span::raw(b)]));
             }
-            let (ide, pinned) = self.effective_ide(p);
+            let (ide, remembered) = self.effective_ide(p);
             lines.push(Line::from(vec![
                 label("editor"),
                 Span::styled(ide.to_string(), Style::new().fg(MATCH)),
                 Span::styled(
-                    if pinned { "  last used" } else { "  default" },
+                    if remembered {
+                        "  last used"
+                    } else {
+                        "  default"
+                    },
                     Style::new().fg(DIM),
                 ),
             ]));
@@ -460,17 +460,17 @@ impl<'a> App<'a> {
         );
     }
 
-    fn draw_actions(&mut self, f: &mut Frame, area: Rect) {
+    fn draw_editors(&mut self, f: &mut Frame, area: Rect) {
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Style::new().fg(ACCENT))
-            .title(" Run ");
-        let pinned = self.current().and_then(|p| p.ide.clone());
+            .title(" Open with ");
+        let remembered = self.current().is_some_and(|p| p.ide.is_some());
         let items: Vec<ListItem> = self
-            .actions
+            .editors
             .iter()
             .enumerate()
-            .map(|(i, a)| {
+            .map(|(i, ide)| {
                 let num = if i < 9 {
                     format!("{} ", i + 1)
                 } else {
@@ -478,11 +478,10 @@ impl<'a> App<'a> {
                 };
                 let mut spans = vec![
                     Span::styled(num, Style::new().fg(DIM)),
-                    Span::raw(a.label.clone()),
+                    Span::raw(ide.clone()),
                 ];
-                // Mark which editor opens by default for this project.
-                if a.ide.is_some() && i == 0 {
-                    let note = if pinned.is_some() {
+                if i == 0 {
+                    let note = if remembered {
                         "  ★ last used"
                     } else {
                         "  ★ default"
@@ -496,7 +495,7 @@ impl<'a> App<'a> {
             .block(block)
             .highlight_symbol("▌ ")
             .highlight_style(Style::new().bg(SELECT_BG).add_modifier(Modifier::BOLD));
-        f.render_stateful_widget(list, area, &mut self.action_list);
+        f.render_stateful_widget(list, area, &mut self.editor_list);
     }
 
     fn draw_hint(&self, f: &mut Frame, area: Rect) {
@@ -508,8 +507,8 @@ impl<'a> App<'a> {
             return;
         }
         let text = match self.stage {
-            Stage::Projects => " ⏎ actions   ^o open   ^e editor   ⇥ tag   ^u clear   esc quit",
-            Stage::Actions => " ⏎ run   1-9 quick run   d set as editor   esc back",
+            Stage::Projects => " ⏎ open   → open with…   ^e switch editor   ⇥ tag   esc quit",
+            Stage::Editors => " ⏎ open   1-9 quick open   esc back",
         };
         f.render_widget(Paragraph::new(text).style(Style::new().fg(DIM)), area);
     }
@@ -578,48 +577,20 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+    use std::rc::Rc;
 
-    fn proj(name: &str, tags: &[&str]) -> Project {
+    type Saved = Rc<RefCell<Vec<(PathBuf, Option<String>)>>>;
+
+    fn proj(name: &str, tags: &[&str], ide: Option<&str>) -> Project {
         Project {
             name: name.into(),
             path: format!("/tmp/{name}").into(),
             tags: tags.iter().map(|s| s.to_string()).collect(),
             last_opened: None,
-            ide: None,
+            ide: ide.map(String::from),
         }
-    }
-
-    fn app(cfg: &Config) -> App<'_> {
-        let ps = vec![
-            proj("alpha", &["work"]),
-            proj("beta", &["oss"]),
-            proj("gamma", &["work"]),
-        ];
-        App::new(
-            ps,
-            vec!["oss".into(), "work".into()],
-            cfg,
-            Box::new(|_, _| {}),
-        )
-    }
-
-    type Saved = std::rc::Rc<std::cell::RefCell<Vec<(std::path::PathBuf, Option<String>)>>>;
-
-    /// An app whose editor changes are recorded, standing in for the saved store.
-    fn app_rec(cfg: &Config) -> (App<'_>, Saved) {
-        let saved: Saved = Default::default();
-        let sink = saved.clone();
-        let ps = vec![proj("alpha", &["work"]), proj("beta", &["oss"])];
-        let app = App::new(
-            ps,
-            vec![],
-            cfg,
-            Box::new(move |p, ide| {
-                sink.borrow_mut()
-                    .push((p.to_path_buf(), ide.map(String::from)))
-            }),
-        );
-        (app, saved)
     }
 
     fn three_ides() -> Config {
@@ -629,17 +600,119 @@ mod tests {
         }
     }
 
+    /// Three projects; every editor change is recorded in the returned log,
+    /// standing in for the saved store.
+    fn app(cfg: &Config) -> (App<'_>, Saved) {
+        let saved: Saved = Default::default();
+        let sink = saved.clone();
+        let ps = vec![
+            proj("alpha", &["work"], None),
+            proj("beta", &["oss"], Some("vim")),
+            proj("gamma", &["work"], None),
+        ];
+        let app = App::new(
+            ps,
+            vec!["oss".into(), "work".into()],
+            cfg,
+            Box::new(move |p, ide| {
+                sink.borrow_mut()
+                    .push((p.to_path_buf(), ide.map(String::from)))
+            }),
+        );
+        (app, saved)
+    }
+
+    fn key(a: &mut App, code: KeyCode) {
+        a.on_key(code, KeyModifiers::NONE);
+    }
+
+    fn ctrl(a: &mut App, c: char) {
+        a.on_key(KeyCode::Char(c), KeyModifiers::CONTROL);
+    }
+
+    fn type_str(a: &mut App, s: &str) {
+        for c in s.chars() {
+            key(a, KeyCode::Char(c));
+        }
+    }
+
+    #[test]
+    fn fuzzy_filter_narrows_and_ranks() {
+        let cfg = three_ides();
+        let (mut a, _) = app(&cfg);
+        assert_eq!(a.visible.len(), 3);
+        type_str(&mut a, "gm");
+        assert_eq!(a.current().unwrap().name, "gamma");
+        ctrl(&mut a, 'u');
+        assert_eq!(a.visible.len(), 3);
+    }
+
+    #[test]
+    fn tag_cycle_filters() {
+        let cfg = three_ides();
+        let (mut a, _) = app(&cfg);
+        key(&mut a, KeyCode::Tab); // oss
+        assert_eq!(a.visible.len(), 1);
+        key(&mut a, KeyCode::Tab); // work
+        assert_eq!(a.visible.len(), 2);
+        key(&mut a, KeyCode::Tab); // back to all
+        assert_eq!(a.visible.len(), 3);
+    }
+
+    #[test]
+    fn enter_opens_immediately_in_the_global_default() {
+        let cfg = three_ides();
+        let (mut a, _) = app(&cfg);
+        type_str(&mut a, "alpha");
+        key(&mut a, KeyCode::Enter);
+        let picked = a.done.take().unwrap().unwrap();
+        assert_eq!(picked.project.name, "alpha");
+        assert_eq!(picked.ide, "code");
+    }
+
+    #[test]
+    fn enter_uses_the_projects_own_editor() {
+        let cfg = three_ides();
+        let (mut a, _) = app(&cfg);
+        type_str(&mut a, "beta"); // remembered vim
+        key(&mut a, KeyCode::Enter);
+        assert_eq!(a.done.take().unwrap().unwrap().ide, "vim");
+    }
+
+    #[test]
+    fn right_arrow_lists_editors_remembered_first_and_number_opens() {
+        let cfg = three_ides();
+        let (mut a, _) = app(&cfg);
+        type_str(&mut a, "beta");
+        key(&mut a, KeyCode::Right);
+        assert!(a.stage == Stage::Editors);
+        assert_eq!(a.editors, vec!["vim", "code", "pycharm"]);
+        key(&mut a, KeyCode::Char('3'));
+        assert_eq!(a.done.take().unwrap().unwrap().ide, "pycharm");
+    }
+
+    #[test]
+    fn esc_goes_back_then_quits() {
+        let cfg = three_ides();
+        let (mut a, _) = app(&cfg);
+        key(&mut a, KeyCode::Right);
+        key(&mut a, KeyCode::Esc);
+        assert!(a.stage == Stage::Projects && a.done.is_none());
+        key(&mut a, KeyCode::Esc);
+        assert!(matches!(a.done, Some(None)));
+    }
+
     #[test]
     fn ctrl_e_cycles_editors_saves_each_and_wraps_to_default() {
         let cfg = three_ides();
-        let (mut a, saved) = app_rec(&cfg);
-        let ctrl_e = |a: &mut App| a.on_key(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        let (mut a, saved) = app(&cfg);
+        type_str(&mut a, "alpha");
 
-        ctrl_e(&mut a);
+        ctrl(&mut a, 'e');
         assert_eq!(a.current().unwrap().ide.as_deref(), Some("pycharm"));
-        ctrl_e(&mut a);
+        ctrl(&mut a, 'e');
         assert_eq!(a.current().unwrap().ide.as_deref(), Some("vim"));
-        ctrl_e(&mut a); // back to the global default, stored as "not pinned"
+        ctrl(&mut a, 'e'); // back to the global default, stored as "not set"
         assert_eq!(a.current().unwrap().ide, None);
 
         let log: Vec<_> = saved.borrow().iter().map(|(_, i)| i.clone()).collect();
@@ -647,125 +720,32 @@ mod tests {
     }
 
     #[test]
+    fn enter_after_ctrl_e_opens_the_chosen_editor() {
+        let cfg = three_ides();
+        let (mut a, _) = app(&cfg);
+        type_str(&mut a, "alpha");
+        ctrl(&mut a, 'e');
+        key(&mut a, KeyCode::Enter);
+        assert_eq!(a.done.take().unwrap().unwrap().ide, "pycharm");
+    }
+
+    #[test]
     fn ctrl_e_with_one_editor_explains_instead_of_changing() {
         let cfg = Config::default();
-        let (mut a, saved) = app_rec(&cfg);
-        a.on_key(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        let (mut a, saved) = app(&cfg);
+        ctrl(&mut a, 'e');
         assert!(a.status.as_deref().unwrap().contains("only one editor"));
         assert!(saved.borrow().is_empty());
     }
 
     #[test]
-    fn d_in_action_list_pins_that_editor_and_moves_it_first() {
-        let cfg = three_ides();
-        let (mut a, saved) = app_rec(&cfg);
-        a.on_key(KeyCode::Enter, KeyModifiers::NONE);
-        a.on_key(KeyCode::Down, KeyModifiers::NONE); // "Open in pycharm"
-        a.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
-
-        assert_eq!(a.current().unwrap().ide.as_deref(), Some("pycharm"));
-        assert_eq!(a.actions[0].label, "Open in pycharm");
-        assert_eq!(a.action_list.selected(), Some(0));
-        assert_eq!(saved.borrow().len(), 1);
-    }
-
-    #[test]
-    fn d_on_the_global_default_editor_remembers_it_too() {
-        let cfg = three_ides();
-        let (mut a, saved) = app_rec(&cfg);
-        a.on_key(KeyCode::Char('e'), KeyModifiers::CONTROL); // pycharm
-        a.on_key(KeyCode::Enter, KeyModifiers::NONE);
-        // actions: pycharm, code, vim; pick "code", which is the global default
-        a.on_key(KeyCode::Down, KeyModifiers::NONE);
-        a.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
-        assert_eq!(a.current().unwrap().ide.as_deref(), Some("code"));
-        assert_eq!(a.actions[0].label, "Open in code");
-        assert_eq!(saved.borrow().last().unwrap().1.as_deref(), Some("code"));
-    }
-
-    #[test]
-    fn d_on_a_non_editor_action_changes_nothing() {
-        let cfg = three_ides();
-        let (mut a, saved) = app_rec(&cfg);
-        a.on_key(KeyCode::Enter, KeyModifiers::NONE);
-        let last = a.actions.len() - 1; // "Shell here"
-        a.action_list.select(Some(last));
-        a.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
-        assert!(a.status.is_some());
-        assert!(saved.borrow().is_empty());
-    }
-
-    #[test]
-    fn ctrl_o_opens_the_pinned_editor() {
-        let cfg = three_ides();
-        let (mut a, _) = app_rec(&cfg);
-        a.on_key(KeyCode::Char('e'), KeyModifiers::CONTROL);
-        a.on_key(KeyCode::Char('o'), KeyModifiers::CONTROL);
-        let picked = a.done.take().unwrap().unwrap();
-        assert_eq!(picked.action.cmd, "pycharm .");
-    }
-
-    fn type_str(app: &mut App, s: &str) {
-        for c in s.chars() {
-            app.on_key(KeyCode::Char(c), KeyModifiers::NONE);
-        }
-    }
-
-    #[test]
-    fn fuzzy_filter_narrows_and_ranks() {
-        let cfg = Config::default();
-        let mut a = app(&cfg);
-        assert_eq!(a.visible.len(), 3);
-        type_str(&mut a, "gm");
-        assert_eq!(a.current().unwrap().name, "gamma");
-        a.on_key(KeyCode::Char('u'), KeyModifiers::CONTROL);
-        assert_eq!(a.visible.len(), 3);
-    }
-
-    #[test]
-    fn tag_cycle_filters() {
-        let cfg = Config::default();
-        let mut a = app(&cfg);
-        a.on_key(KeyCode::Tab, KeyModifiers::NONE); // oss
-        assert_eq!(a.visible.len(), 1);
-        a.on_key(KeyCode::Tab, KeyModifiers::NONE); // work
-        assert_eq!(a.visible.len(), 2);
-        a.on_key(KeyCode::Tab, KeyModifiers::NONE); // back to all
-        assert_eq!(a.visible.len(), 3);
-    }
-
-    #[test]
-    fn enter_then_number_picks_action() {
-        let cfg = Config::default();
-        let mut a = app(&cfg);
-        type_str(&mut a, "beta");
-        a.on_key(KeyCode::Enter, KeyModifiers::NONE);
-        assert!(a.stage == Stage::Actions);
-        a.on_key(KeyCode::Char('1'), KeyModifiers::NONE);
-        let picked = a.done.take().unwrap().unwrap();
-        assert_eq!(picked.project.name, "beta");
-        assert!(picked.action.detached); // first action is the IDE
-    }
-
-    #[test]
-    fn esc_goes_back_then_quits() {
-        let cfg = Config::default();
-        let mut a = app(&cfg);
-        a.on_key(KeyCode::Enter, KeyModifiers::NONE);
-        a.on_key(KeyCode::Esc, KeyModifiers::NONE);
-        assert!(a.stage == Stage::Projects && a.done.is_none());
-        a.on_key(KeyCode::Esc, KeyModifiers::NONE);
-        assert!(matches!(a.done, Some(None)));
-    }
-
-    #[test]
     fn renders_without_panicking_at_small_and_large_sizes() {
-        let cfg = Config::default();
+        let cfg = three_ides();
         for (w, h) in [(20, 5), (80, 24), (200, 60)] {
-            let mut a = app(&cfg);
+            let (mut a, _) = app(&cfg);
             let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
             t.draw(|f| a.draw(f)).unwrap();
-            a.on_key(KeyCode::Enter, KeyModifiers::NONE);
+            key(&mut a, KeyCode::Right);
             t.draw(|f| a.draw(f)).unwrap();
         }
     }
@@ -774,10 +754,9 @@ mod tests {
     #[test]
     #[ignore]
     fn dump_screens() {
-        let cfg = Config::default();
-        let mut a = app(&cfg);
+        let cfg = three_ides();
+        let (mut a, _) = app(&cfg);
         let mut t = Terminal::new(TestBackend::new(96, 24)).unwrap();
-        type_str(&mut a, "a");
         for step in 0..2 {
             t.draw(|f| a.draw(f)).unwrap();
             let buf = t.backend().buffer().clone();
@@ -788,7 +767,7 @@ mod tests {
                     .collect();
                 println!("{}", row.trim_end());
             }
-            a.on_key(KeyCode::Enter, KeyModifiers::NONE);
+            key(&mut a, KeyCode::Right);
         }
     }
 }
