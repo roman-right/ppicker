@@ -1,7 +1,7 @@
 [project]
 name = "code-compass"
 version = "0.2.0"
-description = "DEPRECATED: replaced by projpick (command: pj)"
+description = "DEPRECATED: replaced by ppicker (command: pp)"
 classifiers = ["Development Status :: 7 - Inactive"]
 authors = [
     { name = "Roman", email = "roman-right@protonmail.com" }
@@ -12,6 +12,10 @@ dependencies = [
     "cookiecutter>=2.1.1,<3.0.0",
     "pyside6>=6.5.0,<7.0.0"
 ]
+
+[project.urls]
+Homepage = "https://github.com/roman-right/ppicker"
+Migration = "https://github.com/roman-right/ppicker/blob/main/docs/MIGRATION.md"
 
 [project.scripts]
 code-compass = "code_compass.cli:main"

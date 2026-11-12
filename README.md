@@ -5,6 +5,7 @@
 > terminal picker built for i3/sway. Move your projects over with
 > `code-compass migrate`. The `code-compass` name on PyPI will later be handed
 > over to another project, so migrate while this release is still available.
+> Details: [migration guide](https://github.com/roman-right/ppicker/blob/main/docs/MIGRATION.md).
 
 ![Screenshot](assets/screenshot-1.png)
 
