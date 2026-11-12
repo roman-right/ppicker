@@ -186,3 +186,5 @@ tilt_modules
 # Poetry stuff
 poetry.lock
 projects.db
+# Rust
+/target

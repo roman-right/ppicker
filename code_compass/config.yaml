@@ -1,5 +1,0 @@
-ide_commands:
-  - pycharm
-  - code
-projects_path: ~
-cookiecutter: https://github.com/roman-right/py-template

@@ -1,51 +1,70 @@
-# Code Compass
+# ppicker
 
-![Screenshot](assets/screenshot-1.png)
+A tiny, instant project and runner picker for tiling window managers.
+Press a hotkey, type a few letters, hit Enter: your IDE opens, or a script runs.
+No typing paths, no dozens of hotkeys.
 
-A simple and intuitive desktop application to manage your coding projects, built with Python and Qt (using PySide6).
+- ~1 MB single binary, starts in milliseconds
+- Fuzzy search, tag filters, git branch and last-opened preview
+- Actions auto-detected: IDEs, `cargo`, `npm`/`pnpm`/`yarn`/`bun` scripts, `uv`, `just`, `make`, `docker compose`, `git`
+- Works as a built-in TUI or through rofi / wofi / fuzzel / fzf
 
-## Features
-
-* Organize projects into categories.
-* Quickly access project information, such as project name, path, and last opened date.
-* Easily add, create, delete, and run projects with built-in buttons.
-* Customize your project's attributes like name, path, and category.
-* Choose between different IDEs, such as PyCharm and Visual Studio Code.
-* Tab-based navigation for easy access to different project categories.
-
-## Installation
+## Install
 
 ```shell
-pip install code-compass
+pipx install ppicker     # or: uv tool install ppicker
+cargo install ppicker
 ```
 
-## Usage
+The command is `pp`.
+
+## Use
 
 ```shell
-code-compass
+pp add .                  # register the current directory
+pp scan ~/code -t work    # register every git repo inside ~/code
+pp                        # open the picker
+pp menu                   # pick through rofi instead
+pp run myproj "git pull"  # no UI
 ```
 
-## Configuration
+Keys: type to search, `Enter` for actions, `1`-`9` to run an action, `Ctrl-o` to run the
+default (first) action immediately, `Tab` to cycle tags, `Esc` to go back / quit.
 
-Code Compass uses a configuration file to store your preferences. The configuration file is located at `~/.config/code_compass/config.yaml`.
-
-### Example
-
-```yaml
-
-# IDE commands to run when clicking the "Run" button.
-ide_commands:
-  - pycharm
-  - code
-
-# Default path to start browsing when adding or creating a new project.
-projects_path: /home/username/Projects
-
-# Cookiecutter template to use when creating a new project.
-cookiecutter: https://github.com/roman-right/py-template
+## i3 / sway
 
 ```
+bindsym $mod+p exec --no-startup-id alacritty --class pp-popup -e pp
+for_window [class="pp-popup"] floating enable, resize set 960 520, move position center
+```
 
-## Contributing
+Or with rofi: `bindsym $mod+p exec --no-startup-id pp menu`.
+Other launchers: `pp menu --cmd "fuzzel --dmenu"` (`{prompt}` is replaced by the step name).
 
-Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
+## Config
+
+`pp paths` prints the locations. `config.toml`:
+
+```toml
+ides = ["code", "pycharm"]   # first one is the default action
+scan_dirs = ["/home/me/code"]
+```
+
+Per-project actions go in `<project>/.ppicker.toml`:
+
+```toml
+[[action]]
+label = "Dev server"
+cmd = "npm run dev"
+```
+
+## Migrating from `code-compass` 0.1.x
+
+This is the successor to the Qt-based `code-compass` package. To carry your projects over:
+
+```shell
+pipx install ppicker
+pipx run code-compass==0.2.0 migrate   # reads the old database, pipes it into `pp import -`
+```
+
+Or just re-add them with `pp scan ~/code`.
