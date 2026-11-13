@@ -106,15 +106,11 @@ fn real_main() -> Result<()> {
             store.sort_recent();
             let tags = store.all_tags();
             let projects = store.projects.clone();
-            // Editor changes made in the picker are saved the moment they happen.
-            let on_ide_change = Box::new(|path: &Path, ide: Option<&str>| {
-                store.set_ide(path, ide.map(String::from));
-                let _ = store.save();
+            let host = Box::new(PickerHost {
+                store: &mut store,
+                cfg: &cfg,
             });
-            let picked = tui::pick(projects, tags, &cfg, on_ide_change)?;
-            if let Some(p) = picked {
-                launch(&mut store, &cfg, &p.project, &p.ide)?;
-            }
+            tui::pick(projects, tags, &cfg, host)?;
         }
         Some(Cmd::Add {
             path,
@@ -295,6 +291,24 @@ fn real_main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// What the picker uses to start editors and save changes while it runs.
+struct PickerHost<'a> {
+    store: &'a mut Store,
+    cfg: &'a Config,
+}
+
+impl tui::Host for PickerHost<'_> {
+    /// Saved the moment it changes, so quitting any way loses nothing.
+    fn ide_changed(&mut self, path: &Path, ide: Option<&str>) {
+        self.store.set_ide(path, ide.map(String::from));
+        let _ = self.store.save();
+    }
+
+    fn open(&mut self, project: &Project, ide: &str) -> Result<()> {
+        launch(self.store, self.cfg, project, ide)
+    }
 }
 
 /// Start the editor first, and only remember it (and the open time) if that
