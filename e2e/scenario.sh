@@ -13,9 +13,9 @@ sleep 2
 
 # Fake editors that record where they were started, to prove the detached launch.
 for ed in code pycharm vim; do
-  printf '#!/bin/sh\npwd > /tmp/%s_called\n' "$ed" > /usr/local/bin/$ed && chmod +x /usr/local/bin/$ed
+  printf '#!/bin/sh\npwd > /tmp/%s_called\nprintf "%%s\\n" "$@" > /tmp/%s_args\n' "$ed" "$ed" > /usr/local/bin/$ed && chmod +x /usr/local/bin/$ed
 done
-reset_calls() { rm -f /tmp/code_called /tmp/pycharm_called /tmp/vim_called; }
+reset_calls() { rm -f /tmp/code_called /tmp/pycharm_called /tmp/vim_called /tmp/codium_called /tmp/*_args; }
 
 # Fake projects.
 mkdir -p ~/code && cd ~/code
@@ -87,6 +87,40 @@ $PP open dotfiles
 sleep 1
 check "pp open uses the editor given at add time (vim)" "[ \"\$(called vim)\" = /root/code/dotfiles ]"
 $PP list
+
+echo "=== 7. workspaces: a .code-workspace file (with a space in its path) is a project too ==="
+mkdir -p "$HOME/code/my work"
+WS="$HOME/code/my work/Shop Front.code-workspace"
+printf '{"folders":[{"path":"."}]}' > "$WS"
+printf 'not a project' > "$HOME/code/plain.txt"
+$PP add "$WS" -t work
+check "workspace listed as a workspace, named after the file" "$PP list --plain | grep -q '^Shop Front.*workspace$'"
+check "a plain file is rejected" "! $PP add \$HOME/code/plain.txt >/dev/null 2>&1"
+check "pycharm is refused for a workspace" "! $PP open 'Shop Front' pycharm >/dev/null 2>&1"
+reset_calls
+popup
+xdotool type --delay 120 "shop"; sleep 1
+shot 7-workspace                      # marked with a diamond, "type VS Code workspace", editor = code
+xdotool key Right; sleep 1
+shot 8-workspace-open-with            # only editors that can open it
+xdotool key Return; sleep 2
+check "workspace opened by code from its own folder" "[ \"\$(called code)\" = '/root/code/my work' ]"
+check "workspace file passed whole, spaces intact" "[ \"\$(cat /tmp/code_args)\" = '$WS' ]"
+pkill alacritty 2>/dev/null; sleep 1
+
+echo "--- 'vscode' finds whichever VS Code command exists (here only codium)"
+reset_calls
+mv /usr/local/bin/code /tmp/code.real
+printf '#!/bin/sh\npwd > /tmp/codium_called\n' > /usr/local/bin/codium && chmod +x /usr/local/bin/codium
+printf 'ides = ["vscode"]\n' > ~/.config/ppicker/config.toml
+$PP editor "Shop Front" --reset >/dev/null   # it remembered the literal `code` from above
+$PP open "Shop Front"; sleep 1
+check "vscode resolved to codium" "[ \"\$(called codium)\" = '/root/code/my work' ]"
+mv /tmp/code.real /usr/local/bin/code; rm -f /usr/local/bin/codium
+printf 'ides = ["pycharm", "vim"]\n' > ~/.config/ppicker/config.toml
+$PP editor "Shop Front" --reset >/dev/null
+check "no editor can open it: error says what to add" "$PP open 'Shop Front' 2>&1 | grep -q 'VS Code.*vscode'"
+printf 'ides = ["code", "pycharm", "vim"]\n' > ~/.config/ppicker/config.toml
 
 echo "=== overview: every project, each with the editor it was last opened in ==="
 popup

@@ -87,6 +87,31 @@ default.
 
 ![Switching a project's editor with Ctrl-e](https://raw.githubusercontent.com/roman-right/ppicker/main/assets/04-switch-editor.png)
 
+### Workspaces, not just folders
+
+A project does not have to be a folder. You can add a **workspace file** too, and ppicker opens it
+the way the editor expects:
+
+```shell
+pp add ~/work/shop.code-workspace     # a VS Code workspace
+pp add ~/work/site.sublime-project    # a Sublime Text project
+pp scan ~/work --workspaces           # also pick up workspace files while scanning
+```
+
+A workspace is named after its file (`Shop Front`) and marked with `◇` in the list; the details
+panel says what kind it is.
+
+![A VS Code workspace in the list](https://raw.githubusercontent.com/roman-right/ppicker/main/assets/07-workspace.png)
+
+A `.code-workspace` file means something only to VS Code, so ppicker offers only editors that can
+open it. `Enter` uses the first VS Code editor in your `ides`, `→` lists just those (below, `code`
+only: vim and PyCharm are left out), and `Ctrl-e` cycles only through them.
+
+![Only editors that can open a workspace are offered](https://raw.githubusercontent.com/roman-right/ppicker/main/assets/08-workspace-open-with.png)
+
+If none of your editors can open it, ppicker says which one to add instead of failing silently.
+A folder and a workspace file are separate entries, so one repository can appear as both.
+
 ### Use rofi, wofi or fuzzel instead
 
 If you already have a launcher you like, use it for the picking:
@@ -129,16 +154,55 @@ List the editors you use in the config file (run `pp paths` to see where it is).
 the default for projects you have not opened yet:
 
 ```toml
-ides = ["code", "pycharm", "vim"]
+ides = ["vscode", "pycharm", "zed"]
 scan_dirs = ["/home/me/code"]     # used by `pp scan` when you give no folder
 ```
 
-An editor is just a command. ppicker runs `<command> .` inside the project folder, for example
-`code .` or `pycharm .`. Anything that opens a folder works, including `idea`, `zed`, `subl`,
-`nvim` (see the note below for terminal editors) or `code -n`.
+Each entry is either a **name** ppicker knows, or a plain **command**.
+
+### Names: the same editor on every system
+
+Editor commands are called different things on different systems: `code` on Linux, `code.cmd` on
+Windows, `codium`, a flatpak... A name stands for a list of commands, and ppicker runs the first
+one it finds on your `PATH`. So the same config works everywhere:
+
+| Name | Tries, in order |
+|---|---|
+| `vscode` | `code`, `code-insiders`, `codium`, `vscodium`, the VS Code flatpak |
+| `pycharm` | `pycharm`, `pycharm-professional`, `pycharm-community`, `charm`, `pycharm64`, the PyCharm flatpaks |
+| `idea`, `webstorm`, `goland`, `rustrover`, `clion`, `phpstorm`, `rider`, `rubymine` | the usual launcher name of each (and its `64` variant) |
+| `sublime` | `subl`, `sublime_text`, `sublime-text` |
+| `zed` | `zed`, `zeditor` |
+| `cursor`, `windsurf` | the same name |
+
+If a name is not found you get an error that lists what was tried.
+
+### Plain commands
+
+Anything else is run as written, for example `code`, `idea`, `code -n` or `alacritty -e nvim`.
+Put a path with spaces in quotes: `"C:\Program Files\Some Editor\editor.exe"`. ppicker recognises
+the well-known commands (`code`, `codium`, `cursor`, `subl`, `pycharm`, ...) so it knows which
+projects they can open.
+
+### Your own command list
+
+If your install is somewhere unusual, or you want a different order, override a name (or define a
+new one) in `config.toml`. The first command that exists is used:
+
+```toml
+[commands]
+vscode = ['C:\Tools\VSCode\bin\code.cmd', "code"]   # my install first, then whatever is on PATH
+work = ["codium", "code"]                           # a new name, usable in `ides`
+```
+
+### How a project is opened
+
+A folder is opened as `<editor> .` from inside the folder. A workspace file is opened as
+`<editor> <file>` (see [Workspaces](https://github.com/roman-right/ppicker#workspaces-not-just-folders)). The editor is started detached,
+so it keeps running after ppicker exits.
 
 > **Terminal editors** such as vim or nvim need a terminal to run in. Use a command that starts
-> one, for example `ides = ["code", "alacritty -e nvim"]`.
+> one, for example `ides = ["vscode", "alacritty -e nvim"]`.
 
 ## Commands
 
@@ -153,8 +217,10 @@ pp editor myproj pycharm        # set it without opening
 pp editor myproj --reset        # forget it, back to the default editor
 pp add . --ide pycharm          # register the current folder and set its editor
 pp add . --name api -t work     # custom name, add a tag (repeat -t for more)
+pp add ~/w/shop.code-workspace  # add a workspace file instead of a folder
 pp scan ~/code -t work          # add every git repository in a folder
-pp list                         # show projects with their editors
+pp scan ~/code --workspaces     # ...and the workspace files in it (one level down)
+pp list                         # show projects with their editors (workspaces marked ◇)
 pp rm myproj                    # remove from the list (files are untouched)
 pp menu [--ask]                 # pick through rofi or another launcher
 pp paths                        # where the config and project list are stored
@@ -185,6 +251,9 @@ Two small text files you can read and edit; `pp paths` prints the exact location
 
 - `config.toml`: your settings (editors, scan folders).
 - `projects.toml`: your projects, their tags, last-opened time and remembered editor.
+
+To keep both somewhere else (a portable install, or to try things out without touching your
+real list), set `PPICKER_HOME` to a folder; ppicker then uses `config/` and `data/` inside it.
 
 ## Moving from `code-compass`
 

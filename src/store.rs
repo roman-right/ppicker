@@ -1,12 +1,15 @@
 //! Persistent project list and user configuration.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+
+use crate::editors::{Editor, Kind};
 
 pub fn now() -> i64 {
     SystemTime::now()
@@ -17,6 +20,17 @@ pub fn now() -> i64 {
 
 fn dirs() -> Result<ProjectDirs> {
     ProjectDirs::from("", "", "ppicker").context("cannot determine config directory")
+}
+
+/// `(config dir, data dir)`. Setting `PPICKER_HOME` keeps everything under that
+/// one folder (`config/` and `data/`): handy for tests and portable installs.
+fn base_dirs() -> Result<(PathBuf, PathBuf)> {
+    if let Some(home) = std::env::var_os("PPICKER_HOME") {
+        let home = PathBuf::from(home);
+        return Ok((home.join("config"), home.join("data")));
+    }
+    let d = dirs()?;
+    Ok((d.config_dir().to_path_buf(), d.data_dir().to_path_buf()))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +47,13 @@ pub struct Project {
     pub ide: Option<String>,
 }
 
+impl Project {
+    /// A folder, or a workspace file such as `shop.code-workspace`.
+    pub fn kind(&self) -> Kind {
+        Kind::of(&self.path)
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Store {
     #[serde(default, rename = "project")]
@@ -41,7 +62,7 @@ pub struct Store {
 
 impl Store {
     pub fn path() -> Result<PathBuf> {
-        Ok(dirs()?.data_dir().join("projects.toml"))
+        Ok(base_dirs()?.1.join("projects.toml"))
     }
 
     pub fn load() -> Result<Self> {
@@ -66,11 +87,31 @@ impl Store {
     }
 
     /// Add a project, or update name/tags if the path is already known.
+    /// The path is a folder or a workspace file (`.code-workspace`,
+    /// `.sublime-project`); other files are rejected.
     pub fn add(&mut self, path: &Path, name: Option<String>, tags: Vec<String>) -> Result<bool> {
         let path = canonical(path)?;
+        let kind = Kind::of(&path);
+        if path.is_file() && !kind.is_workspace() {
+            bail!(
+                "{} is a file, not a folder or a known workspace file (.code-workspace, .sublime-project)",
+                path.display()
+            );
+        }
+        if path.is_dir() && kind.is_workspace() {
+            bail!(
+                "{} is a folder, but its name looks like a workspace file",
+                path.display()
+            );
+        }
         let name = name.unwrap_or_else(|| {
-            path.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
+            // `shop.code-workspace` is called "shop"; folders keep their name.
+            let part = if kind.is_workspace() {
+                path.file_stem()
+            } else {
+                path.file_name()
+            };
+            part.map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.display().to_string())
         });
         if let Some(existing) = self.projects.iter_mut().find(|p| p.path == path) {
@@ -188,10 +229,14 @@ fn strip_unc(p: PathBuf) -> PathBuf {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Commands used for the "open in ..." actions, first is the default.
+    /// Editors, by command or logical name (`vscode`, `pycharm`, ...).
+    /// The first one that can open a project is its default.
     pub ides: Vec<String>,
     /// Directories scanned by `pp scan` when none is given.
     pub scan_dirs: Vec<PathBuf>,
+    /// Overrides for what a name runs: `vscode = ["code-insiders", "code"]`
+    /// (the first command found on PATH is used). Can also define new names.
+    pub commands: HashMap<String, Vec<String>>,
 }
 
 impl Default for Config {
@@ -199,35 +244,69 @@ impl Default for Config {
         Self {
             ides: vec!["code".into()],
             scan_dirs: vec![],
+            commands: HashMap::new(),
         }
     }
 }
 
 impl Config {
-    /// The editor used when a project has none pinned.
-    pub fn default_ide(&self) -> &str {
-        self.ides.first().map(String::as_str).unwrap_or("code")
+    pub fn editor(&self, label: &str) -> Editor {
+        Editor::parse(label, &self.commands)
     }
 
-    /// Editors in menu order: the project's pinned one first, then the rest.
-    pub fn ide_choices(&self, pinned: Option<&str>) -> Vec<String> {
+    /// Can the editor named `label` open this kind of project?
+    pub fn supports(&self, label: &str, kind: Kind) -> bool {
+        self.editor(label).supports(kind)
+    }
+
+    /// Configured editors that can open `kind`, in config order.
+    pub fn compatible(&self, kind: Kind) -> Vec<String> {
+        self.ides
+            .iter()
+            .filter(|i| self.supports(i, kind))
+            .cloned()
+            .collect()
+    }
+
+    /// The editor used for `kind` when a project has none remembered.
+    pub fn default_ide(&self, kind: Kind) -> Option<&str> {
+        self.ides
+            .iter()
+            .find(|i| self.supports(i, kind))
+            .map(String::as_str)
+    }
+
+    /// Editors to offer for a project, remembered one first, then the rest.
+    /// Only editors that can open `kind` appear.
+    pub fn choices(&self, remembered: Option<&str>, kind: Kind) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
-        if let Some(p) = pinned {
-            out.push(p.to_string());
+        if let Some(r) = remembered
+            && self.supports(r, kind)
+        {
+            out.push(r.to_string());
         }
-        for ide in &self.ides {
-            if !out.contains(ide) {
-                out.push(ide.clone());
+        for ide in self.compatible(kind) {
+            if !out.contains(&ide) {
+                out.push(ide);
             }
-        }
-        if out.is_empty() {
-            out.push("code".into());
         }
         out
     }
 
+    /// The editor that opens `p`, and whether it is remembered for it. `None`
+    /// when no configured editor can open this kind of project.
+    pub fn effective_ide<'a>(&'a self, p: &'a Project) -> Option<(&'a str, bool)> {
+        let kind = p.kind();
+        if let Some(ide) = p.ide.as_deref()
+            && self.supports(ide, kind)
+        {
+            return Some((ide, true));
+        }
+        self.default_ide(kind).map(|d| (d, false))
+    }
+
     pub fn path() -> Result<PathBuf> {
-        Ok(dirs()?.config_dir().join("config.toml"))
+        Ok(base_dirs()?.0.join("config.toml"))
     }
 
     pub fn load() -> Result<Self> {
@@ -339,6 +418,83 @@ mod tests {
         // Opening with a different editor replaces it.
         s.record_launch(p, Some("code"));
         assert_eq!(s.projects[0].ide.as_deref(), Some("code"));
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("pp_store_{tag}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn workspace_files_can_be_added_and_are_named_after_the_file() {
+        let d = scratch("ws");
+        let ws = d.join("shop.code-workspace");
+        fs::write(&ws, "{}").unwrap();
+        let mut s = Store::default();
+        assert!(s.add(&ws, None, vec![]).unwrap());
+        assert_eq!(s.projects[0].name, "shop");
+        assert_eq!(s.projects[0].kind(), Kind::VsCodeWorkspace);
+        // The folder next to it is a separate, ordinary project.
+        assert!(s.add(&d, None, vec![]).unwrap());
+        assert_eq!(s.projects[1].kind(), Kind::Folder);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn plain_files_are_rejected() {
+        let d = scratch("file");
+        let f = d.join("notes.txt");
+        fs::write(&f, "x").unwrap();
+        let err = Store::default().add(&f, None, vec![]).unwrap_err();
+        assert!(err.to_string().contains("not a folder"), "{err}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn editors_are_offered_only_for_what_they_can_open() {
+        let cfg = Config {
+            ides: vec!["code".into(), "pycharm".into(), "vim".into()],
+            ..Config::default()
+        };
+        assert_eq!(cfg.compatible(Kind::Folder), vec!["code", "pycharm", "vim"]);
+        assert_eq!(cfg.compatible(Kind::VsCodeWorkspace), vec!["code"]);
+        assert_eq!(cfg.default_ide(Kind::VsCodeWorkspace), Some("code"));
+        // A remembered editor that cannot open this kind is ignored.
+        assert_eq!(
+            cfg.choices(Some("pycharm"), Kind::VsCodeWorkspace),
+            vec!["code"]
+        );
+        assert_eq!(
+            cfg.choices(Some("pycharm"), Kind::Folder),
+            vec!["pycharm", "code", "vim"]
+        );
+
+        let only_pycharm = Config {
+            ides: vec!["pycharm".into()],
+            ..Config::default()
+        };
+        assert_eq!(only_pycharm.default_ide(Kind::VsCodeWorkspace), None);
+        assert!(only_pycharm.compatible(Kind::SublimeProject).is_empty());
+    }
+
+    #[test]
+    fn effective_editor_falls_back_when_the_remembered_one_does_not_fit() {
+        let cfg = Config {
+            ides: vec!["code".into(), "pycharm".into()],
+            ..Config::default()
+        };
+        let mut p = Project {
+            name: "shop".into(),
+            path: "/w/shop.code-workspace".into(),
+            tags: vec![],
+            last_opened: None,
+            ide: Some("pycharm".into()),
+        };
+        assert_eq!(cfg.effective_ide(&p), Some(("code", false)));
+        p.ide = Some("code".into());
+        assert_eq!(cfg.effective_ide(&p), Some(("code", true)));
     }
 
     #[test]

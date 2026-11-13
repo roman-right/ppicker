@@ -152,32 +152,37 @@ impl<'a> App<'a> {
     }
 
     /// Editor that opens for a project, and whether one is remembered for it.
-    fn effective_ide<'p>(&'p self, p: &'p Project) -> (&'p str, bool) {
-        match p.ide.as_deref() {
-            Some(ide) => (ide, true),
-            None => (self.cfg.default_ide(), false),
-        }
+    /// `None` if no configured editor can open this kind of project.
+    fn effective_ide<'p>(&'p self, p: &'p Project) -> Option<(&'p str, bool)> {
+        self.cfg.effective_ide(p)
     }
 
     /// Open the selected project in its own editor (Enter).
     fn open_current(&mut self) {
-        if let Some(p) = self.current() {
-            let ide = self.effective_ide(p).0.to_string();
-            self.done = Some(Some(Picked {
-                project: p.clone(),
-                ide,
-            }));
+        let Some(p) = self.current() else { return };
+        match self.effective_ide(p) {
+            Some((ide, _)) => {
+                self.done = Some(Some(Picked {
+                    project: p.clone(),
+                    ide: ide.to_string(),
+                }));
+            }
+            None => self.status = Some(no_editor_message(p)),
         }
     }
 
-    /// Show the "Open with..." list (Right arrow).
+    /// Show the "Open with..." list (Right arrow). Only editors that can open
+    /// this kind of project (folder or workspace file) are listed.
     fn enter_editors(&mut self) {
-        if let Some(p) = self.current() {
-            let pinned = p.ide.clone();
-            self.editors = self.cfg.ide_choices(pinned.as_deref());
-            self.editor_list.select(Some(0));
-            self.stage = Stage::Editors;
+        let Some(p) = self.current() else { return };
+        let choices = self.cfg.choices(p.ide.as_deref(), p.kind());
+        if choices.is_empty() {
+            self.status = Some(no_editor_message(p));
+            return;
         }
+        self.editors = choices;
+        self.editor_list.select(Some(0));
+        self.stage = Stage::Editors;
     }
 
     fn open_with(&mut self, index: usize) {
@@ -198,7 +203,7 @@ impl<'a> App<'a> {
         self.projects[idx].ide = ide.clone();
         let p = &self.projects[idx];
         (self.on_ide_change)(&p.path, ide.as_deref());
-        let (name, remembered) = self.effective_ide(p);
+        let (name, remembered) = self.effective_ide(p).unwrap_or(("none", false));
         self.status = Some(format!(
             "{}: editor is now {name}{}",
             p.name,
@@ -206,13 +211,17 @@ impl<'a> App<'a> {
         ));
     }
 
-    /// Ctrl-e: step through the configured editors; wraps to the global default.
+    /// Ctrl-e: step through the editors that can open this project; wraps to
+    /// the global default.
     fn cycle_ide(&mut self) {
         let Some(p) = self.current() else { return };
-        let list = &self.cfg.ides;
+        let list = self.cfg.compatible(p.kind());
         if list.len() < 2 {
-            self.status =
-                Some("only one editor configured; add more to `ides` in config.toml".into());
+            self.status = Some(if list.is_empty() {
+                no_editor_message(p)
+            } else {
+                "only one editor can open this; add more to `ides` in config.toml".into()
+            });
             return;
         }
         let at = p
@@ -352,7 +361,7 @@ impl<'a> App<'a> {
             .title(format!(" Projects ({}) ", self.visible.len()));
 
         let pattern = Pattern::parse(&self.query, CaseMatching::Smart, Normalization::Smart);
-        let default_ide = self.cfg.default_ide();
+        let cfg = self.cfg;
         let items: Vec<ListItem> = self
             .visible
             .iter()
@@ -382,8 +391,12 @@ impl<'a> App<'a> {
                         }
                     })
                     .collect();
+                // Workspace files get a marker, since they look like folders otherwise.
+                if p.kind().is_workspace() {
+                    spans.push(Span::styled(" ◇", Style::new().fg(ACCENT)));
+                }
                 // Show which editor Enter will use, right in the list.
-                let ide = p.ide.as_deref().unwrap_or(default_ide);
+                let ide = cfg.effective_ide(p).map_or("-", |(i, _)| i);
                 spans.push(Span::styled(format!("  {ide}"), Style::new().fg(DIM)));
                 ListItem::new(Line::from(spans))
             })
@@ -416,19 +429,30 @@ impl<'a> App<'a> {
             if let Some(b) = git_branch(&p.path) {
                 lines.push(Line::from(vec![label("branch"), Span::raw(b)]));
             }
-            let (ide, remembered) = self.effective_ide(p);
-            lines.push(Line::from(vec![
-                label("editor"),
-                Span::styled(ide.to_string(), Style::new().fg(MATCH)),
-                Span::styled(
-                    if remembered {
-                        "  last used"
-                    } else {
-                        "  default"
-                    },
-                    Style::new().fg(DIM),
-                ),
-            ]));
+            if p.kind().is_workspace() {
+                lines.push(Line::from(vec![
+                    label("type"),
+                    Span::styled(p.kind().label(), Style::new().fg(ACCENT)),
+                ]));
+            }
+            match self.effective_ide(p) {
+                Some((ide, remembered)) => lines.push(Line::from(vec![
+                    label("editor"),
+                    Span::styled(ide.to_string(), Style::new().fg(MATCH)),
+                    Span::styled(
+                        if remembered {
+                            "  last used"
+                        } else {
+                            "  default"
+                        },
+                        Style::new().fg(DIM),
+                    ),
+                ])),
+                None => lines.push(Line::from(vec![
+                    label("editor"),
+                    Span::styled("none can open this", Style::new().fg(Color::Red)),
+                ])),
+            }
             lines.push(Line::from(vec![
                 label("opened"),
                 Span::raw(ago(p.last_opened)),
@@ -514,6 +538,14 @@ impl<'a> App<'a> {
     }
 }
 
+fn no_editor_message(p: &Project) -> String {
+    format!(
+        "no configured editor can open this {}; add {} to `ides`",
+        p.kind().label(),
+        p.kind().needs()
+    )
+}
+
 fn centered(area: Rect, max_w: u16, max_h: u16) -> Rect {
     let w = area.width.min(max_w);
     let h = area.height.min(max_h);
@@ -596,8 +628,23 @@ mod tests {
     fn three_ides() -> Config {
         Config {
             ides: vec!["code".into(), "pycharm".into(), "vim".into()],
-            scan_dirs: vec![],
+            ..Config::default()
         }
+    }
+
+    /// A folder and a VS Code workspace file side by side.
+    fn app_with_workspace(cfg: &Config) -> App<'_> {
+        let ps = vec![
+            proj("alpha", &[], None),
+            Project {
+                name: "shop".into(),
+                path: "/tmp/shop.code-workspace".into(),
+                tags: vec![],
+                last_opened: None,
+                ide: None,
+            },
+        ];
+        App::new(ps, vec![], cfg, Box::new(|_, _| {}))
     }
 
     /// Three projects; every editor change is recorded in the returned log,
@@ -736,6 +783,77 @@ mod tests {
         ctrl(&mut a, 'e');
         assert!(a.status.as_deref().unwrap().contains("only one editor"));
         assert!(saved.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_workspace_is_offered_only_the_editors_that_can_open_it() {
+        let cfg = Config {
+            ides: vec!["pycharm".into(), "code".into(), "vim".into()],
+            ..Config::default()
+        };
+        let mut a = app_with_workspace(&cfg);
+        type_str(&mut a, "shop");
+        // Enter picks the first editor that can open it: "code", not "pycharm".
+        key(&mut a, KeyCode::Right);
+        assert_eq!(a.editors, vec!["code"]);
+        key(&mut a, KeyCode::Esc);
+        key(&mut a, KeyCode::Enter);
+        assert_eq!(a.done.take().unwrap().unwrap().ide, "code");
+
+        // The folder next to it still gets everything.
+        let mut a = app_with_workspace(&cfg);
+        type_str(&mut a, "alpha");
+        key(&mut a, KeyCode::Right);
+        assert_eq!(a.editors, vec!["pycharm", "code", "vim"]);
+    }
+
+    #[test]
+    fn a_workspace_with_no_capable_editor_explains_instead_of_opening() {
+        let cfg = Config {
+            ides: vec!["pycharm".into(), "vim".into()],
+            ..Config::default()
+        };
+        let mut a = app_with_workspace(&cfg);
+        type_str(&mut a, "shop");
+        key(&mut a, KeyCode::Enter);
+        assert!(a.done.is_none());
+        let msg = a.status.clone().unwrap();
+        assert!(
+            msg.contains("VS Code workspace") && msg.contains("vscode"),
+            "{msg}"
+        );
+        key(&mut a, KeyCode::Right);
+        assert!(a.stage == Stage::Projects); // no empty editor list
+    }
+
+    #[test]
+    fn ctrl_e_cycles_only_through_editors_that_fit() {
+        let cfg = Config {
+            ides: vec!["code".into(), "pycharm".into(), "codium".into()],
+            ..Config::default()
+        };
+        let mut a = app_with_workspace(&cfg);
+        type_str(&mut a, "shop");
+        ctrl(&mut a, 'e');
+        assert_eq!(a.current().unwrap().ide.as_deref(), Some("codium")); // skips pycharm
+        ctrl(&mut a, 'e');
+        assert_eq!(a.current().unwrap().ide, None); // wrapped to the default
+    }
+
+    #[test]
+    fn workspaces_are_marked_in_the_list_and_described_in_details() {
+        let cfg = three_ides();
+        let mut a = app_with_workspace(&cfg);
+        let mut t = Terminal::new(TestBackend::new(96, 24)).unwrap();
+        type_str(&mut a, "shop");
+        t.draw(|f| a.draw(f)).unwrap();
+        let buf = t.backend().buffer().clone();
+        let screen: String = (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)).collect::<Vec<_>>())
+            .map(|(x, y)| buf[(x, y)].symbol().to_string())
+            .collect();
+        assert!(screen.contains('◇'), "list marker missing");
+        assert!(screen.contains("VS Code workspace"), "type row missing");
     }
 
     #[test]
