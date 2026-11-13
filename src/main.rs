@@ -1,3 +1,4 @@
+mod editors;
 mod exec;
 mod menu;
 mod store;
@@ -8,7 +9,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
-use store::{Config, Store};
+use editors::Kind;
+use store::{Config, Project, Store};
 
 #[derive(Parser)]
 #[command(
@@ -23,7 +25,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Add a project (default: current directory)
+    /// Add a project: a folder (default: current directory) or a workspace file
+    /// (`.code-workspace`, `.sublime-project`)
     Add {
         path: Option<PathBuf>,
         #[arg(short, long)]
@@ -48,7 +51,7 @@ enum Cmd {
     Rm { project: String },
     /// List projects
     List {
-        /// Print tab-separated name, path, tags, editor
+        /// Print tab-separated name, path, tags, editor, kind
         #[arg(long)]
         plain: bool,
     },
@@ -57,6 +60,10 @@ enum Cmd {
         dirs: Vec<PathBuf>,
         #[arg(short, long)]
         tag: Vec<String>,
+        /// Also add workspace files (`*.code-workspace`, `*.sublime-project`) found in
+        /// those directories and one level below
+        #[arg(short, long)]
+        workspaces: bool,
     },
     /// Open a project without the picker, in its editor or the one given
     Open {
@@ -106,7 +113,7 @@ fn real_main() -> Result<()> {
             });
             let picked = tui::pick(projects, tags, &cfg, on_ide_change)?;
             if let Some(p) = picked {
-                launch(&mut store, &p.project.path, &p.ide)?;
+                launch(&mut store, &cfg, &p.project, &p.ide)?;
             }
         }
         Some(Cmd::Add {
@@ -116,6 +123,10 @@ fn real_main() -> Result<()> {
             ide,
         }) => {
             let path = path.unwrap_or_else(|| PathBuf::from("."));
+            if let Some(ide) = &ide {
+                // Fail before anything is changed.
+                check_editor(&cfg, ide, Kind::of(&store::canonical(&path)?))?;
+            }
             let created = store.add(&path, name, tag)?;
             if ide.is_some() {
                 store.set_ide(&store::canonical(&path)?, ide);
@@ -133,14 +144,20 @@ fn real_main() -> Result<()> {
             };
             if reset {
                 store.set_ide(&p.path, None);
-            } else if ide.is_some() {
-                store.set_ide(&p.path, ide);
+            } else if let Some(ide) = ide {
+                check_editor(&cfg, &ide, p.kind())?;
+                store.set_ide(&p.path, Some(ide));
             }
             store.save()?;
-            let now = store.find(&project).and_then(|p| p.ide.clone());
-            match now {
-                Some(ide) => println!("{}: {ide} (remembered)", p.name),
-                None => println!("{}: {} (default)", p.name, cfg.default_ide()),
+            let now = store.find(&project).cloned().unwrap_or(p);
+            match cfg.effective_ide(&now) {
+                Some((ide, true)) => println!("{}: {ide} (remembered)", now.name),
+                Some((ide, false)) => println!("{}: {ide} (default)", now.name),
+                None => println!(
+                    "{}: no editor can open this ({})",
+                    now.name,
+                    now.kind().label()
+                ),
             }
         }
         Some(Cmd::Rm { project }) => {
@@ -152,20 +169,30 @@ fn real_main() -> Result<()> {
         Some(Cmd::List { plain }) => {
             store.sort_recent();
             for p in &store.projects {
-                let ide = p.ide.as_deref().unwrap_or_else(|| cfg.default_ide());
+                let ide = cfg.effective_ide(p).map_or("-", |(i, _)| i);
                 if plain {
+                    let kind = if p.kind().is_workspace() {
+                        "workspace"
+                    } else {
+                        "folder"
+                    };
                     println!(
-                        "{}\t{}\t{}\t{ide}",
+                        "{}\t{}\t{}\t{ide}\t{kind}",
                         p.name,
                         p.path.display(),
                         p.tags.join(",")
                     );
                 } else {
-                    println!("{:<28} {:<10} {}", p.name, ide, p.path.display());
+                    let mark = if p.kind().is_workspace() { " ◇" } else { "" };
+                    println!("{:<28} {:<10} {}{mark}", p.name, ide, p.path.display());
                 }
             }
         }
-        Some(Cmd::Scan { dirs, tag }) => {
+        Some(Cmd::Scan {
+            dirs,
+            tag,
+            workspaces,
+        }) => {
             let dirs = if dirs.is_empty() {
                 cfg.scan_dirs.clone()
             } else {
@@ -181,6 +208,20 @@ fn real_main() -> Result<()> {
                     if path.join(".git").exists() && store.add(&path, None, tag.clone())? {
                         added += 1;
                     }
+                    if workspaces {
+                        for ws in workspace_files(&path) {
+                            if store.add(&ws, None, tag.clone())? {
+                                added += 1;
+                            }
+                        }
+                    }
+                }
+                if workspaces {
+                    for ws in workspace_files(&dir) {
+                        if store.add(&ws, None, tag.clone())? {
+                            added += 1;
+                        }
+                    }
                 }
             }
             store.save()?;
@@ -190,10 +231,21 @@ fn real_main() -> Result<()> {
             let Some(p) = store.find(&project).cloned() else {
                 bail!("no such project: {project}");
             };
-            let ide = ide
-                .or(p.ide.clone())
-                .unwrap_or_else(|| cfg.default_ide().to_string());
-            launch(&mut store, &p.path, &ide)?;
+            let ide = match ide {
+                Some(ide) => {
+                    check_editor(&cfg, &ide, p.kind())?;
+                    ide
+                }
+                None => match cfg.effective_ide(&p) {
+                    Some((ide, _)) => ide.to_string(),
+                    None => bail!(
+                        "no configured editor can open this {}; add {} to `ides`",
+                        p.kind().label(),
+                        p.kind().needs()
+                    ),
+                },
+            };
+            launch(&mut store, &cfg, &p, &ide)?;
         }
         Some(Cmd::Menu { cmd, ask }) => {
             store.sort_recent();
@@ -205,10 +257,16 @@ fn real_main() -> Result<()> {
             let Some(i) = menu::choose(&cmd, "project", &lines)? else {
                 return Ok(());
             };
-            let path = store.projects[i].path.clone();
-            let pinned = store.projects[i].ide.clone();
+            let project = store.projects[i].clone();
 
-            let choices = cfg.ide_choices(pinned.as_deref());
+            let choices = cfg.choices(project.ide.as_deref(), project.kind());
+            if choices.is_empty() {
+                bail!(
+                    "no configured editor can open this {}; add {} to `ides`",
+                    project.kind().label(),
+                    project.kind().needs()
+                );
+            }
             let ide = if ask {
                 let Some(j) = menu::choose(&cmd, "editor", &choices)? else {
                     return Ok(());
@@ -217,7 +275,7 @@ fn real_main() -> Result<()> {
             } else {
                 choices[0].clone()
             };
-            launch(&mut store, &path, &ide)?;
+            launch(&mut store, &cfg, &project, &ide)?;
         }
         Some(Cmd::Import { file }) => {
             let text = if file == "-" {
@@ -239,9 +297,33 @@ fn real_main() -> Result<()> {
     Ok(())
 }
 
-/// Remember the editor and the open time, then start the editor.
-fn launch(store: &mut Store, path: &Path, ide: &str) -> Result<()> {
-    store.record_launch(path, Some(ide));
-    store.save()?;
-    exec::open(path, ide)
+/// Start the editor first, and only remember it (and the open time) if that
+/// worked, so a typo'd or missing command is never saved as the project's editor.
+fn launch(store: &mut Store, cfg: &Config, project: &Project, ide: &str) -> Result<()> {
+    exec::open(&project.path, project.kind(), ide, cfg)?;
+    store.record_launch(&project.path, Some(ide));
+    store.save()
+}
+
+/// Reject an editor that cannot open this kind of project.
+fn check_editor(cfg: &Config, ide: &str, kind: Kind) -> Result<()> {
+    if !cfg.supports(ide, kind) {
+        bail!(
+            "`{ide}` cannot open a {}; use {}",
+            kind.label(),
+            kind.needs()
+        );
+    }
+    Ok(())
+}
+
+/// Workspace files directly inside `dir`.
+fn workspace_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return vec![];
+    };
+    entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file() && Kind::of(p).is_workspace())
+        .collect()
 }
