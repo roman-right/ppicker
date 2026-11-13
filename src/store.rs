@@ -237,6 +237,9 @@ pub struct Config {
     /// Overrides for what a name runs: `vscode = ["code-insiders", "code"]`
     /// (the first command found on PATH is used). Can also define new names.
     pub commands: HashMap<String, Vec<String>>,
+    /// If true, `Enter` opens a project and leaves the picker open (and
+    /// `Ctrl-o` opens and quits). By default it is the other way round.
+    pub keep_open: bool,
 }
 
 impl Default for Config {
@@ -245,6 +248,7 @@ impl Default for Config {
             ides: vec!["code".into()],
             scan_dirs: vec![],
             commands: HashMap::new(),
+            keep_open: false,
         }
     }
 }

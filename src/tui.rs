@@ -27,14 +27,16 @@ enum Stage {
     Editors,
 }
 
-/// What the user chose: open `project` with the editor command `ide`.
-pub struct Picked {
-    pub project: Project,
-    pub ide: String,
+/// What the picker asks of the program around it: starting editors and
+/// saving changes. The picker calls these while it is running, so it can stay
+/// open after launching something.
+pub trait Host {
+    /// A project's remembered editor changed (`None` = the global default).
+    fn ide_changed(&mut self, path: &Path, ide: Option<&str>);
+    /// Start `ide` on `project`. An error (say, the command is not installed)
+    /// is shown in the picker instead of closing it.
+    fn open(&mut self, project: &Project, ide: &str) -> Result<()>;
 }
-
-/// Receives `(project path, remembered editor)` each time the editor changes.
-type IdeChanged<'a> = Box<dyn FnMut(&Path, Option<&str>) + 'a>;
 
 struct App<'a> {
     cfg: &'a Config,
@@ -50,9 +52,9 @@ struct App<'a> {
     editors: Vec<String>,
     editor_list: ListState,
     matcher: Matcher,
-    done: Option<Option<Picked>>,
-    /// Called whenever a project's editor changes, so it is saved at once.
-    on_ide_change: IdeChanged<'a>,
+    /// Set when the picker should close.
+    done: bool,
+    host: Box<dyn Host + 'a>,
     /// One-line feedback shown in place of the key hints until the next key.
     status: Option<String>,
 }
@@ -62,7 +64,7 @@ impl<'a> App<'a> {
         projects: Vec<Project>,
         tags: Vec<String>,
         cfg: &'a Config,
-        on_ide_change: IdeChanged<'a>,
+        host: Box<dyn Host + 'a>,
     ) -> Self {
         let mut app = Self {
             cfg,
@@ -76,8 +78,8 @@ impl<'a> App<'a> {
             editors: vec![],
             editor_list: ListState::default(),
             matcher: Matcher::new(MatcherConfig::DEFAULT.match_paths()),
-            done: None,
-            on_ide_change,
+            done: false,
+            host,
             status: None,
         };
         app.refilter();
@@ -157,17 +159,45 @@ impl<'a> App<'a> {
         self.cfg.effective_ide(p)
     }
 
-    /// Open the selected project in its own editor (Enter).
-    fn open_current(&mut self) {
+    /// Whether the picker stays open after opening. `Enter` follows the
+    /// `keep_open` setting; the alternate key (`Ctrl-o`) does the opposite.
+    fn stays_open(&self, alternate: bool) -> bool {
+        self.cfg.keep_open != alternate
+    }
+
+    /// Open the selected project in its own editor.
+    fn open_current(&mut self, alternate: bool) {
         let Some(p) = self.current() else { return };
         match self.effective_ide(p) {
             Some((ide, _)) => {
-                self.done = Some(Some(Picked {
-                    project: p.clone(),
-                    ide: ide.to_string(),
-                }));
+                let ide = ide.to_string();
+                self.open_selected(ide, self.stays_open(alternate));
             }
             None => self.status = Some(no_editor_message(p)),
+        }
+    }
+
+    /// Start `ide` on the selected project. On success the picker closes, or
+    /// stays open (ready for the next project) if `stay`. On failure it always
+    /// stays open and says why.
+    fn open_selected(&mut self, ide: String, stay: bool) {
+        let Some(&idx) = self.list.selected().and_then(|i| self.visible.get(i)) else {
+            return;
+        };
+        let project = self.projects[idx].clone();
+        match self.host.open(&project, &ide) {
+            Ok(()) => {
+                // Mirror what the host saved, so the list and details are current.
+                self.projects[idx].ide = Some(ide.clone());
+                self.projects[idx].last_opened = Some(now());
+                if stay {
+                    self.stage = Stage::Projects;
+                    self.status = Some(format!("opened {} in {ide}", project.name));
+                } else {
+                    self.done = true;
+                }
+            }
+            Err(e) => self.status = Some(format!("{e:#}")),
         }
     }
 
@@ -185,12 +215,9 @@ impl<'a> App<'a> {
         self.stage = Stage::Editors;
     }
 
-    fn open_with(&mut self, index: usize) {
-        if let (Some(p), Some(ide)) = (self.current(), self.editors.get(index)) {
-            self.done = Some(Some(Picked {
-                project: p.clone(),
-                ide: ide.clone(),
-            }));
+    fn open_with(&mut self, index: usize, alternate: bool) {
+        if let Some(ide) = self.editors.get(index).cloned() {
+            self.open_selected(ide, self.stays_open(alternate));
         }
     }
 
@@ -202,8 +229,8 @@ impl<'a> App<'a> {
         };
         self.projects[idx].ide = ide.clone();
         let p = &self.projects[idx];
-        (self.on_ide_change)(&p.path, ide.as_deref());
-        let (name, remembered) = self.effective_ide(p).unwrap_or(("none", false));
+        self.host.ide_changed(&p.path, ide.as_deref());
+        let (name, remembered) = self.cfg.effective_ide(p).unwrap_or(("none", false));
         self.status = Some(format!(
             "{}: editor is now {name}{}",
             p.name,
@@ -235,23 +262,41 @@ impl<'a> App<'a> {
     }
 
     fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) {
-        let ctrl = mods.contains(KeyModifiers::CONTROL);
+        let mut ctrl = mods.contains(KeyModifiers::CONTROL);
+        // Some terminals (and Windows consoles) deliver Ctrl+letter as the raw
+        // control character (^O = 0x0F), with or without the Ctrl modifier. Treat
+        // it as Ctrl+letter instead of typing garbage into the search box. Tab,
+        // Enter and Backspace arrive as their own keys, so their code points
+        // are left alone.
+        let code = match code {
+            KeyCode::Char(c) if ('\x01'..='\x1a').contains(&c) && !"\x08\t\n\r".contains(c) => {
+                ctrl = true;
+                KeyCode::Char((c as u8 - 1 + b'a') as char)
+            }
+            // With a non-Latin keyboard layout active, Ctrl+<key> reports that
+            // layout's letter (Russian: Ctrl+O arrives as Ctrl+щ). Shortcuts
+            // should work in any layout, so map by key position.
+            KeyCode::Char(c) if ctrl => KeyCode::Char(latin_key(c)),
+            other => other,
+        };
         self.status = None;
         match (code, ctrl) {
-            (KeyCode::Char('c'), true) => self.done = Some(None),
+            (KeyCode::Char('c'), true) => self.done = true,
             (KeyCode::Down, _) | (KeyCode::Char('n' | 'j'), true) => self.move_sel(1),
             (KeyCode::Up, _) | (KeyCode::Char('p' | 'k'), true) => self.move_sel(-1),
             _ => match self.stage {
                 Stage::Projects => self.on_key_projects(code, ctrl),
-                Stage::Editors => self.on_key_editors(code),
+                Stage::Editors => self.on_key_editors(code, ctrl),
             },
         }
     }
 
     fn on_key_projects(&mut self, code: KeyCode, ctrl: bool) {
         match (code, ctrl) {
-            (KeyCode::Esc, _) => self.done = Some(None),
-            (KeyCode::Enter, _) => self.open_current(),
+            (KeyCode::Esc, _) => self.done = true,
+            (KeyCode::Enter, _) => self.open_current(false),
+            // Ctrl-O: open, but do the opposite of Enter about closing the picker.
+            (KeyCode::Char('o'), true) => self.open_current(true),
             (KeyCode::Right, _) => self.enter_editors(),
             (KeyCode::Char('e'), true) => self.cycle_ide(),
             (KeyCode::Tab, _) => self.cycle_tag(true),
@@ -264,7 +309,7 @@ impl<'a> App<'a> {
                 self.query.pop();
                 self.refilter();
             }
-            (KeyCode::Char(c), false) => {
+            (KeyCode::Char(c), false) if !c.is_control() => {
                 self.query.push(c);
                 self.refilter();
             }
@@ -272,18 +317,23 @@ impl<'a> App<'a> {
         }
     }
 
-    fn on_key_editors(&mut self, code: KeyCode) {
-        match code {
-            KeyCode::Esc | KeyCode::Left | KeyCode::Backspace => self.stage = Stage::Projects,
-            KeyCode::Enter => {
+    fn on_key_editors(&mut self, code: KeyCode, ctrl: bool) {
+        match (code, ctrl) {
+            (KeyCode::Esc | KeyCode::Left | KeyCode::Backspace, _) => self.stage = Stage::Projects,
+            (KeyCode::Enter, _) => {
                 if let Some(i) = self.editor_list.selected() {
-                    self.open_with(i);
+                    self.open_with(i, false);
                 }
             }
-            KeyCode::Char(c @ '1'..='9') => {
+            (KeyCode::Char('o'), true) => {
+                if let Some(i) = self.editor_list.selected() {
+                    self.open_with(i, true);
+                }
+            }
+            (KeyCode::Char(c @ '1'..='9'), false) => {
                 let i = c as usize - '1' as usize;
                 if i < self.editors.len() {
-                    self.open_with(i);
+                    self.open_with(i, false);
                 }
             }
             _ => {}
@@ -530,12 +580,31 @@ impl<'a> App<'a> {
             );
             return;
         }
+        let (enter, ctrl_o) = if self.cfg.keep_open {
+            ("open, stay", "open, quit")
+        } else {
+            ("open", "open, stay")
+        };
         let text = match self.stage {
-            Stage::Projects => " ⏎ open   → open with…   ^e switch editor   ⇥ tag   esc quit",
-            Stage::Editors => " ⏎ open   1-9 quick open   esc back",
+            Stage::Projects => format!(
+                " ⏎ {enter}   ^o {ctrl_o}   → open with…   ^e switch editor   ⇥ tag   esc quit"
+            ),
+            Stage::Editors => format!(" ⏎ {enter}   1-9 quick open   ^o {ctrl_o}   esc back"),
         };
         f.render_widget(Paragraph::new(text).style(Style::new().fg(DIM)), area);
     }
+}
+
+/// The Latin letter on the same physical key as a Russian (ЙЦУКЕН) letter, so
+/// `Ctrl+щ` works as `Ctrl+o`. Anything else is returned unchanged.
+fn latin_key(c: char) -> char {
+    const RU: &str = "йцукенгшщзфывапролдячсмить";
+    const EN: &str = "qwertyuiopasdfghjklzxcvbnm";
+    let lower = c.to_lowercase().next().unwrap_or(c);
+    RU.chars()
+        .position(|r| r == lower)
+        .and_then(|i| EN.chars().nth(i))
+        .unwrap_or(c)
 }
 
 fn no_editor_message(p: &Project) -> String {
@@ -577,43 +646,87 @@ fn ago(ts: Option<i64>) -> String {
     }
 }
 
-/// Run the picker. Returns `None` if the user cancelled.
+/// Run the picker until the user quits. Opening and saving go through `host`.
 pub fn pick<'a>(
     projects: Vec<Project>,
     tags: Vec<String>,
     cfg: &'a Config,
-    on_ide_change: IdeChanged<'a>,
-) -> Result<Option<Picked>> {
+    host: Box<dyn Host + 'a>,
+) -> Result<()> {
     let mut terminal: DefaultTerminal = ratatui::init();
-    let result = run_loop(&mut terminal, App::new(projects, tags, cfg, on_ide_change));
+    let result = run_loop(&mut terminal, App::new(projects, tags, cfg, host));
     ratatui::restore();
     result
 }
 
-fn run_loop(terminal: &mut DefaultTerminal, mut app: App) -> Result<Option<Picked>> {
-    loop {
+fn run_loop(terminal: &mut DefaultTerminal, mut app: App) -> Result<()> {
+    while !app.done {
         terminal.draw(|f| app.draw(f))?;
         if let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
             app.on_key(key.code, key.modifiers);
         }
-        if let Some(done) = app.done.take() {
-            return Ok(done);
-        }
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::bail;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::path::PathBuf;
     use std::rc::Rc;
 
-    type Saved = Rc<RefCell<Vec<(PathBuf, Option<String>)>>>;
+    type IdeLog = Rc<RefCell<Vec<(PathBuf, Option<String>)>>>;
+
+    /// What the fake host saw, shared with the test.
+    #[derive(Clone, Default)]
+    struct Rec {
+        ide_changes: IdeLog,
+        /// (project name, editor) for every successful open.
+        opened: Rc<RefCell<Vec<(String, String)>>>,
+        fail_open: Rc<Cell<bool>>,
+    }
+
+    impl Rec {
+        fn ide_log(&self) -> Vec<Option<String>> {
+            self.ide_changes
+                .borrow()
+                .iter()
+                .map(|(_, i)| i.clone())
+                .collect()
+        }
+
+        fn opened(&self) -> Vec<(String, String)> {
+            self.opened.borrow().clone()
+        }
+    }
+
+    struct FakeHost(Rec);
+
+    impl Host for FakeHost {
+        fn ide_changed(&mut self, path: &Path, ide: Option<&str>) {
+            self.0
+                .ide_changes
+                .borrow_mut()
+                .push((path.to_path_buf(), ide.map(String::from)));
+        }
+
+        fn open(&mut self, p: &Project, ide: &str) -> Result<()> {
+            if self.0.fail_open.get() {
+                bail!("command not found: {ide}");
+            }
+            self.0
+                .opened
+                .borrow_mut()
+                .push((p.name.clone(), ide.to_string()));
+            Ok(())
+        }
+    }
 
     fn proj(name: &str, tags: &[&str], ide: Option<&str>) -> Project {
         Project {
@@ -632,8 +745,26 @@ mod tests {
         }
     }
 
+    /// Three projects (beta already remembers vim) with a recording host.
+    fn app(cfg: &Config) -> (App<'_>, Rec) {
+        let rec = Rec::default();
+        let ps = vec![
+            proj("alpha", &["work"], None),
+            proj("beta", &["oss"], Some("vim")),
+            proj("gamma", &["work"], None),
+        ];
+        let app = App::new(
+            ps,
+            vec!["oss".into(), "work".into()],
+            cfg,
+            Box::new(FakeHost(rec.clone())),
+        );
+        (app, rec)
+    }
+
     /// A folder and a VS Code workspace file side by side.
-    fn app_with_workspace(cfg: &Config) -> App<'_> {
+    fn app_with_workspace(cfg: &Config) -> (App<'_>, Rec) {
+        let rec = Rec::default();
         let ps = vec![
             proj("alpha", &[], None),
             Project {
@@ -644,29 +775,8 @@ mod tests {
                 ide: None,
             },
         ];
-        App::new(ps, vec![], cfg, Box::new(|_, _| {}))
-    }
-
-    /// Three projects; every editor change is recorded in the returned log,
-    /// standing in for the saved store.
-    fn app(cfg: &Config) -> (App<'_>, Saved) {
-        let saved: Saved = Default::default();
-        let sink = saved.clone();
-        let ps = vec![
-            proj("alpha", &["work"], None),
-            proj("beta", &["oss"], Some("vim")),
-            proj("gamma", &["work"], None),
-        ];
-        let app = App::new(
-            ps,
-            vec!["oss".into(), "work".into()],
-            cfg,
-            Box::new(move |p, ide| {
-                sink.borrow_mut()
-                    .push((p.to_path_buf(), ide.map(String::from)))
-            }),
-        );
-        (app, saved)
+        let app = App::new(ps, vec![], cfg, Box::new(FakeHost(rec.clone())));
+        (app, rec)
     }
 
     fn key(a: &mut App, code: KeyCode) {
@@ -681,6 +791,21 @@ mod tests {
         for c in s.chars() {
             key(a, KeyCode::Char(c));
         }
+    }
+
+    /// Everything on screen as one string.
+    fn screen(a: &mut App) -> String {
+        let mut t = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        t.draw(|f| a.draw(f)).unwrap();
+        let buf = t.backend().buffer().clone();
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
     }
 
     #[test]
@@ -707,52 +832,188 @@ mod tests {
     }
 
     #[test]
-    fn enter_opens_immediately_in_the_global_default() {
+    fn enter_opens_in_the_global_default_and_closes() {
         let cfg = three_ides();
-        let (mut a, _) = app(&cfg);
+        let (mut a, rec) = app(&cfg);
         type_str(&mut a, "alpha");
         key(&mut a, KeyCode::Enter);
-        let picked = a.done.take().unwrap().unwrap();
-        assert_eq!(picked.project.name, "alpha");
-        assert_eq!(picked.ide, "code");
+        assert!(a.done);
+        assert_eq!(rec.opened(), vec![("alpha".into(), "code".into())]);
     }
 
     #[test]
     fn enter_uses_the_projects_own_editor() {
         let cfg = three_ides();
-        let (mut a, _) = app(&cfg);
+        let (mut a, rec) = app(&cfg);
         type_str(&mut a, "beta"); // remembered vim
         key(&mut a, KeyCode::Enter);
-        assert_eq!(a.done.take().unwrap().unwrap().ide, "vim");
+        assert_eq!(rec.opened(), vec![("beta".into(), "vim".into())]);
     }
 
     #[test]
     fn right_arrow_lists_editors_remembered_first_and_number_opens() {
         let cfg = three_ides();
-        let (mut a, _) = app(&cfg);
+        let (mut a, rec) = app(&cfg);
         type_str(&mut a, "beta");
         key(&mut a, KeyCode::Right);
         assert!(a.stage == Stage::Editors);
         assert_eq!(a.editors, vec!["vim", "code", "pycharm"]);
         key(&mut a, KeyCode::Char('3'));
-        assert_eq!(a.done.take().unwrap().unwrap().ide, "pycharm");
+        assert_eq!(rec.opened(), vec![("beta".into(), "pycharm".into())]);
+        assert!(a.done);
     }
 
     #[test]
     fn esc_goes_back_then_quits() {
         let cfg = three_ides();
-        let (mut a, _) = app(&cfg);
+        let (mut a, rec) = app(&cfg);
         key(&mut a, KeyCode::Right);
         key(&mut a, KeyCode::Esc);
-        assert!(a.stage == Stage::Projects && a.done.is_none());
+        assert!(a.stage == Stage::Projects && !a.done);
         key(&mut a, KeyCode::Esc);
-        assert!(matches!(a.done, Some(None)));
+        assert!(a.done);
+        assert!(rec.opened().is_empty());
+    }
+
+    #[test]
+    fn ctrl_o_opens_and_keeps_the_picker_open_for_the_next_project() {
+        let cfg = three_ides();
+        let (mut a, rec) = app(&cfg);
+        type_str(&mut a, "alpha");
+        ctrl(&mut a, 'o');
+        assert!(!a.done, "picker must stay open");
+        assert_eq!(a.status.as_deref(), Some("opened alpha in code"));
+
+        // Straight on to a second project, in the same session.
+        ctrl(&mut a, 'u');
+        type_str(&mut a, "gamma");
+        ctrl(&mut a, 'o');
+        assert!(!a.done);
+        assert_eq!(
+            rec.opened(),
+            vec![
+                ("alpha".into(), "code".into()),
+                ("gamma".into(), "code".into())
+            ]
+        );
+
+        // The list reflects what was just done.
+        let alpha = a.projects.iter().find(|p| p.name == "alpha").unwrap();
+        assert_eq!(alpha.ide.as_deref(), Some("code"));
+        assert!(alpha.last_opened.is_some());
+
+        key(&mut a, KeyCode::Esc);
+        assert!(a.done);
+    }
+
+    #[test]
+    fn ctrl_o_in_the_editor_list_opens_with_that_editor_and_stays() {
+        let cfg = three_ides();
+        let (mut a, rec) = app(&cfg);
+        type_str(&mut a, "beta");
+        key(&mut a, KeyCode::Right);
+        key(&mut a, KeyCode::Down); // "code"
+        ctrl(&mut a, 'o');
+        assert_eq!(rec.opened(), vec![("beta".into(), "code".into())]);
+        assert!(!a.done);
+        assert!(a.stage == Stage::Projects, "back to the project list");
+    }
+
+    #[test]
+    fn keep_open_setting_swaps_enter_and_ctrl_o() {
+        let cfg = Config {
+            keep_open: true,
+            ..three_ides()
+        };
+        let (mut a, rec) = app(&cfg);
+        type_str(&mut a, "alpha");
+        key(&mut a, KeyCode::Enter);
+        assert!(!a.done, "Enter stays open with keep_open");
+        ctrl(&mut a, 'o');
+        assert!(a.done, "Ctrl-o quits with keep_open");
+        assert_eq!(rec.opened().len(), 2);
+    }
+
+    #[test]
+    fn a_failed_open_keeps_the_picker_open_and_says_why() {
+        let cfg = three_ides();
+        let (mut a, rec) = app(&cfg);
+        rec.fail_open.set(true);
+        type_str(&mut a, "alpha");
+        key(&mut a, KeyCode::Enter);
+        assert!(!a.done);
+        assert_eq!(a.status.as_deref(), Some("command not found: code"));
+        assert!(rec.opened().is_empty());
+        // Nothing is remembered for a launch that did not happen.
+        assert_eq!(a.current().unwrap().ide, None);
+        assert_eq!(a.current().unwrap().last_opened, None);
+    }
+
+    #[test]
+    fn raw_control_characters_act_as_ctrl_keys_and_never_enter_the_search() {
+        let cfg = three_ides();
+        let (mut a, rec) = app(&cfg);
+        type_str(&mut a, "alpha");
+        // ^O as a bare 0x0F, the way some terminals deliver it.
+        a.on_key(KeyCode::Char('\x0f'), KeyModifiers::NONE);
+        assert!(!a.done);
+        assert_eq!(rec.opened(), vec![("alpha".into(), "code".into())]);
+        // ^U (0x15) clears the search; nothing invisible is left behind.
+        a.on_key(KeyCode::Char('\x15'), KeyModifiers::NONE);
+        assert_eq!(a.query, "");
+        type_str(&mut a, "gamma");
+        assert_eq!(a.query, "gamma");
+        assert_eq!(a.current().unwrap().name, "gamma");
+        // A control character that means nothing is simply ignored.
+        a.on_key(KeyCode::Char('\x07'), KeyModifiers::NONE);
+        assert_eq!(a.query, "gamma");
+    }
+
+    #[test]
+    fn shortcuts_work_with_a_russian_keyboard_layout() {
+        let cfg = three_ides();
+        let (mut a, rec) = app(&cfg);
+        type_str(&mut a, "alpha");
+        // Ctrl+O with the Russian layout active arrives as Ctrl+щ.
+        a.on_key(KeyCode::Char('щ'), KeyModifiers::CONTROL);
+        assert_eq!(rec.opened(), vec![("alpha".into(), "code".into())]);
+        assert!(!a.done);
+        // Ctrl+у is Ctrl+e: switch editor.
+        a.on_key(KeyCode::Char('у'), KeyModifiers::CONTROL);
+        assert_eq!(a.current().unwrap().ide.as_deref(), Some("pycharm"));
+        // Ctrl+г is Ctrl+u: clear the search.
+        a.on_key(KeyCode::Char('г'), KeyModifiers::CONTROL);
+        assert_eq!(a.query, "");
+        // Plain Cyrillic typing still searches (project names may be Russian).
+        type_str(&mut a, "щ");
+        assert_eq!(a.query, "щ");
+        assert_eq!(latin_key('Щ'), 'o');
+        assert_eq!(latin_key('x'), 'x');
+    }
+
+    #[test]
+    fn the_hint_line_describes_the_keys_for_the_current_setting() {
+        let cfg = three_ides();
+        let (mut a, _) = app(&cfg);
+        let s = screen(&mut a);
+        assert!(s.contains("⏎ open ") && s.contains("^o open, stay"), "{s}");
+
+        let cfg = Config {
+            keep_open: true,
+            ..three_ides()
+        };
+        let (mut a, _) = app(&cfg);
+        let s = screen(&mut a);
+        assert!(
+            s.contains("⏎ open, stay") && s.contains("^o open, quit"),
+            "{s}"
+        );
     }
 
     #[test]
     fn ctrl_e_cycles_editors_saves_each_and_wraps_to_default() {
         let cfg = three_ides();
-        let (mut a, saved) = app(&cfg);
+        let (mut a, rec) = app(&cfg);
         type_str(&mut a, "alpha");
 
         ctrl(&mut a, 'e');
@@ -762,27 +1023,29 @@ mod tests {
         ctrl(&mut a, 'e'); // back to the global default, stored as "not set"
         assert_eq!(a.current().unwrap().ide, None);
 
-        let log: Vec<_> = saved.borrow().iter().map(|(_, i)| i.clone()).collect();
-        assert_eq!(log, vec![Some("pycharm".into()), Some("vim".into()), None]);
+        assert_eq!(
+            rec.ide_log(),
+            vec![Some("pycharm".into()), Some("vim".into()), None]
+        );
     }
 
     #[test]
     fn enter_after_ctrl_e_opens_the_chosen_editor() {
         let cfg = three_ides();
-        let (mut a, _) = app(&cfg);
+        let (mut a, rec) = app(&cfg);
         type_str(&mut a, "alpha");
         ctrl(&mut a, 'e');
         key(&mut a, KeyCode::Enter);
-        assert_eq!(a.done.take().unwrap().unwrap().ide, "pycharm");
+        assert_eq!(rec.opened(), vec![("alpha".into(), "pycharm".into())]);
     }
 
     #[test]
     fn ctrl_e_with_one_editor_explains_instead_of_changing() {
         let cfg = Config::default();
-        let (mut a, saved) = app(&cfg);
+        let (mut a, rec) = app(&cfg);
         ctrl(&mut a, 'e');
         assert!(a.status.as_deref().unwrap().contains("only one editor"));
-        assert!(saved.borrow().is_empty());
+        assert!(rec.ide_log().is_empty());
     }
 
     #[test]
@@ -791,17 +1054,17 @@ mod tests {
             ides: vec!["pycharm".into(), "code".into(), "vim".into()],
             ..Config::default()
         };
-        let mut a = app_with_workspace(&cfg);
+        let (mut a, rec) = app_with_workspace(&cfg);
         type_str(&mut a, "shop");
         // Enter picks the first editor that can open it: "code", not "pycharm".
         key(&mut a, KeyCode::Right);
         assert_eq!(a.editors, vec!["code"]);
         key(&mut a, KeyCode::Esc);
         key(&mut a, KeyCode::Enter);
-        assert_eq!(a.done.take().unwrap().unwrap().ide, "code");
+        assert_eq!(rec.opened(), vec![("shop".into(), "code".into())]);
 
         // The folder next to it still gets everything.
-        let mut a = app_with_workspace(&cfg);
+        let (mut a, _) = app_with_workspace(&cfg);
         type_str(&mut a, "alpha");
         key(&mut a, KeyCode::Right);
         assert_eq!(a.editors, vec!["pycharm", "code", "vim"]);
@@ -813,10 +1076,10 @@ mod tests {
             ides: vec!["pycharm".into(), "vim".into()],
             ..Config::default()
         };
-        let mut a = app_with_workspace(&cfg);
+        let (mut a, rec) = app_with_workspace(&cfg);
         type_str(&mut a, "shop");
         key(&mut a, KeyCode::Enter);
-        assert!(a.done.is_none());
+        assert!(!a.done && rec.opened().is_empty());
         let msg = a.status.clone().unwrap();
         assert!(
             msg.contains("VS Code workspace") && msg.contains("vscode"),
@@ -832,7 +1095,7 @@ mod tests {
             ides: vec!["code".into(), "pycharm".into(), "codium".into()],
             ..Config::default()
         };
-        let mut a = app_with_workspace(&cfg);
+        let (mut a, _) = app_with_workspace(&cfg);
         type_str(&mut a, "shop");
         ctrl(&mut a, 'e');
         assert_eq!(a.current().unwrap().ide.as_deref(), Some("codium")); // skips pycharm
@@ -843,17 +1106,11 @@ mod tests {
     #[test]
     fn workspaces_are_marked_in_the_list_and_described_in_details() {
         let cfg = three_ides();
-        let mut a = app_with_workspace(&cfg);
-        let mut t = Terminal::new(TestBackend::new(96, 24)).unwrap();
+        let (mut a, _) = app_with_workspace(&cfg);
         type_str(&mut a, "shop");
-        t.draw(|f| a.draw(f)).unwrap();
-        let buf = t.backend().buffer().clone();
-        let screen: String = (0..buf.area.height)
-            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)).collect::<Vec<_>>())
-            .map(|(x, y)| buf[(x, y)].symbol().to_string())
-            .collect();
-        assert!(screen.contains('◇'), "list marker missing");
-        assert!(screen.contains("VS Code workspace"), "type row missing");
+        let s = screen(&mut a);
+        assert!(s.contains('◇'), "list marker missing");
+        assert!(s.contains("VS Code workspace"), "type row missing");
     }
 
     #[test]
@@ -874,16 +1131,10 @@ mod tests {
     fn dump_screens() {
         let cfg = three_ides();
         let (mut a, _) = app(&cfg);
-        let mut t = Terminal::new(TestBackend::new(96, 24)).unwrap();
         for step in 0..2 {
-            t.draw(|f| a.draw(f)).unwrap();
-            let buf = t.backend().buffer().clone();
             println!("--- screen {step} ---");
-            for y in 0..buf.area.height {
-                let row: String = (0..buf.area.width)
-                    .map(|x| buf[(x, y)].symbol().to_string())
-                    .collect();
-                println!("{}", row.trim_end());
+            for line in screen(&mut a).lines() {
+                println!("{}", line.trim_end());
             }
             key(&mut a, KeyCode::Right);
         }

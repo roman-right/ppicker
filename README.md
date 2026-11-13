@@ -57,6 +57,19 @@ editor will be used, when you last opened it, and its tags. Press `Tab` to filte
 Press **Enter**. The project opens in its editor and ppicker closes. The editor is started in
 the project's folder and keeps running on its own, so closing the terminal does not close it.
 
+### Open several projects at once
+
+Press **Ctrl-o** instead of Enter. The project opens just the same, but ppicker **stays open**, so
+you can go straight on to the next one: type, `Ctrl-o`, type, `Ctrl-o`, then `Esc` when you are
+done. A line at the bottom confirms each one (`opened web-ui in pycharm`), and the list updates
+the editor and "last used" time as you go.
+
+![Two projects opened in one session; the picker is still open](https://raw.githubusercontent.com/roman-right/ppicker/main/assets/09-stay-open.png)
+
+Prefer it the other way round? Set `keep_open = true` in the config: then `Enter` opens and stays,
+and `Ctrl-o` opens and quits. If an editor cannot be started (say, its command is not installed),
+ppicker stays open and shows the error instead of closing.
+
 The first time you open a project, it uses your default editor, the first one in your config
 (see [Editors](https://github.com/roman-right/ppicker#editors)). After that it uses whichever editor you opened it with last.
 
@@ -140,13 +153,17 @@ For other launchers, pass the command to use: `pp menu --cmd "fuzzel --dmenu"` (
 |---|---|
 | type | search by name or path |
 | `↑` `↓` (or `Ctrl-p` `Ctrl-n`) | move through the list |
-| `Enter` | open the project in its editor |
+| `Enter` | open the project in its editor, then close |
+| `Ctrl-o` | open the project and **keep the picker open** (to open several) |
 | `→` | open with a different editor |
 | `1`-`9` | in the editor list, open with that editor |
 | `Ctrl-e` | switch the project's editor without opening it |
 | `Tab` / `Shift-Tab` | next / previous tag filter |
 | `Ctrl-u` | clear the search |
 | `←` or `Esc` | back from the editor list; `Esc` in the main list quits |
+
+The `Ctrl` shortcuts also work when a Russian keyboard layout is active (`Ctrl-щ` is `Ctrl-o`).
+With `keep_open = true` in the config, `Enter` and `Ctrl-o` swap roles.
 
 ## Editors
 
@@ -156,6 +173,7 @@ the default for projects you have not opened yet:
 ```toml
 ides = ["vscode", "pycharm", "zed"]
 scan_dirs = ["/home/me/code"]     # used by `pp scan` when you give no folder
+keep_open = false                 # true: Enter opens and stays open, Ctrl-o opens and quits
 ```
 
 Each entry is either a **name** ppicker knows, or a plain **command**.

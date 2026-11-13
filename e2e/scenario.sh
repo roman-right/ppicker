@@ -122,6 +122,23 @@ $PP editor "Shop Front" --reset >/dev/null
 check "no editor can open it: error says what to add" "$PP open 'Shop Front' 2>&1 | grep -q 'VS Code.*vscode'"
 printf 'ides = ["code", "pycharm", "vim"]\n' > ~/.config/ppicker/config.toml
 
+echo "=== 8. Ctrl-O opens several projects without closing the picker ==="
+reset_calls
+popup
+xdotool type --delay 120 "api"; sleep 1
+xdotool key ctrl+o; sleep 1.5
+check "picker is still open after Ctrl-O" "pgrep -x pp >/dev/null"
+check "first project opened (api-server, in code)" "[ \"\$(called code)\" = /root/code/api-server ]"
+xdotool key ctrl+u; sleep 0.3
+xdotool type --delay 120 "web"; sleep 1
+xdotool key ctrl+o; sleep 1.5
+shot 9-stay-open                       # status line: "opened web-ui in pycharm"
+check "second project opened too (web-ui, in pycharm)" "[ \"\$(called pycharm)\" = /root/code/web-ui ]"
+check "picker still open after the second" "pgrep -x pp >/dev/null"
+xdotool key Escape; sleep 1.2
+check "Esc then closes it" "! pgrep -x pp >/dev/null"
+pkill alacritty 2>/dev/null; sleep 1
+
 echo "=== overview: every project, each with the editor it was last opened in ==="
 popup
 shot 0-overview
